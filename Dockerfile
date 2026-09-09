@@ -25,10 +25,16 @@ ARG GOSU_VERSION=1.17
 ARG GH_VERSION=latest
 
 # ---- apt: switch to Tsinghua (TUNA) Debian mirrors ----
-# The stock sources.list is backed up first; if TUNA is unreachable the
-# backup is restored and apt falls back to the official Debian mirrors.
+# Debian 12 ships sources in /etc/apt/sources.list.d/debian.sources (deb822
+# format); /etc/apt/sources.list may not exist in some base images. We back up
+# the whole /etc/apt/sources.list* set, drop the deb822 filewriters, install
+# TUNA one-line sources, and on failure restore the official ones.
 RUN set -eux; \
-    cp /etc/apt/sources.list /tmp/sources.list.official; \
+    rm -rf /tmp/apt-backup; \
+    mkdir -p /tmp/apt-backup && \
+    cp -a /etc/apt/sources.list /tmp/apt-backup/sources.list 2>/dev/null || true; \
+    cp -a /etc/apt/sources.list.d /tmp/apt-backup/sources.list.d 2>/dev/null || true; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.save 2>/dev/null || true; \
     printf '%s\n' \
         'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main contrib non-free non-free-firmware' \
         'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware' \
@@ -36,10 +42,14 @@ RUN set -eux; \
         > /etc/apt/sources.list; \
     if ! apt-get update; then \
         echo "TUNA apt mirror failed, falling back to official Debian mirrors"; \
-        cp /tmp/sources.list.official /etc/apt/sources.list; \
+        rm -f /etc/apt/sources.list; \
+        cp -a /tmp/apt-backup/sources.list /etc/apt/sources.list 2>/dev/null || true; \
+        rm -rf /etc/apt/sources.list.d; \
+        cp -a /tmp/apt-backup/sources.list.d /etc/apt/sources.list.d 2>/dev/null || true; \
+        install -d /etc/apt/sources.list.d; \
         apt-get update; \
     fi; \
-    rm -f /tmp/sources.list.official
+    rm -rf /tmp/apt-backup
 
 # ---- Base packages: git, wget, curl ----
 # Includes the full C/C++ toolchain, Python + pip, and common build headers.
@@ -97,7 +107,7 @@ RUN set -eux; \
 # ---- Node.js (NodeSource) - TUNA mirror first, official fallback ----
 RUN set -eux; \
     if curl -fsSL --max-time 20 "https://mirrors.tuna.tsinghua.edu.cn/nodesource/gpgkey/nodesource.gpg.key" -o /tmp/ns.key 2>/dev/null; then \
-        install -d -m 0755 /usr/share/keyrings; \
+        install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d; \
         gpg --dearmor -o /usr/share/keyrings/nodesource.gpg < /tmp/ns.key; \
         echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://mirrors.tuna.tsinghua.edu.cn/nodesource/deb bookworm main" > /etc/apt/sources.list.d/nodesource.list; \
         if ! (apt-get update && apt-cache show nodejs >/dev/null 2>&1); then \
