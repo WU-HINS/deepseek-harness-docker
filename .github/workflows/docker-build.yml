@@ -46,6 +46,8 @@ jobs:
       dsh_version: ${{ steps.version.outputs.dsh_version }}
       push_latest: ${{ steps.latest.outputs.push_latest }}
       push_dockerhub: ${{ steps.hub.outputs.push_dockerhub }}
+      repo_lower: ${{ steps.lower.outputs.repo_lower }}
+      hub_user_lower: ${{ steps.lower.outputs.hub_user_lower }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -83,6 +85,14 @@ jobs:
             echo "push_dockerhub=false" >> "$GITHUB_OUTPUT"
             echo "Docker Hub credentials missing -> skipping Docker Hub"
           fi
+
+      - name: Lowercase repository and Docker Hub username
+        id: lower
+        run: |
+          echo "repo_lower=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          HUB_USER="${{ secrets.DOCKERHUB_USERNAME }}"
+          echo "hub_user_lower=${HUB_USER,,}" >> "$GITHUB_OUTPUT"
+          echo "GHCR repo: ${GITHUB_REPOSITORY,,}"
 
   build:
     name: Build ${{ matrix.platform }}
@@ -128,8 +138,8 @@ jobs:
           build-args: |
             DSH_VERSION=${{ needs.resolve.outputs.dsh_version }}
           tags: |
-            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-${{ matrix.suffix }}
-            ${{ secrets.DOCKERHUB_USERNAME != '' && needs.resolve.outputs.push_dockerhub == 'true' && format('{0}/deepseek-harness:{1}-{2}', secrets.DOCKERHUB_USERNAME, needs.resolve.outputs.dsh_version, matrix.suffix) || '' }}
+            ghcr.io/${{ needs.resolve.outputs.repo_lower }}:${{ needs.resolve.outputs.dsh_version }}-${{ matrix.suffix }}
+            ${{ needs.resolve.outputs.hub_user_lower != '' && needs.resolve.outputs.push_dockerhub == 'true' && format('{0}/deepseek-harness:{1}-{2}', needs.resolve.outputs.hub_user_lower, needs.resolve.outputs.dsh_version, matrix.suffix) || '' }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -157,30 +167,30 @@ jobs:
       - name: Merge GHCR manifest (version tag)
         run: |
           docker buildx imagetools create \
-            -t ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }} \
-            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-amd64 \
-            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-arm64
+            -t ghcr.io/${{ needs.resolve.outputs.repo_lower }}:${{ needs.resolve.outputs.dsh_version }} \
+            ghcr.io/${{ needs.resolve.outputs.repo_lower }}:${{ needs.resolve.outputs.dsh_version }}-amd64 \
+            ghcr.io/${{ needs.resolve.outputs.repo_lower }}:${{ needs.resolve.outputs.dsh_version }}-arm64
 
       - name: Merge GHCR manifest (latest tag)
         if: needs.resolve.outputs.push_latest == 'true'
         run: |
           docker buildx imagetools create \
-            -t ghcr.io/${{ github.repository }}:latest \
-            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-amd64 \
-            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-arm64
+            -t ghcr.io/${{ needs.resolve.outputs.repo_lower }}:latest \
+            ghcr.io/${{ needs.resolve.outputs.repo_lower }}:${{ needs.resolve.outputs.dsh_version }}-amd64 \
+            ghcr.io/${{ needs.resolve.outputs.repo_lower }}:${{ needs.resolve.outputs.dsh_version }}-arm64
 
       - name: Merge Docker Hub manifest (version tag)
         if: needs.resolve.outputs.push_dockerhub == 'true'
         run: |
           docker buildx imagetools create \
-            -t ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }} \
-            ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-amd64 \
-            ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-arm64
+            -t ${{ needs.resolve.outputs.hub_user_lower }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }} \
+            ${{ needs.resolve.outputs.hub_user_lower }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-amd64 \
+            ${{ needs.resolve.outputs.hub_user_lower }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-arm64
 
       - name: Merge Docker Hub manifest (latest tag)
         if: needs.resolve.outputs.push_dockerhub == 'true' && needs.resolve.outputs.push_latest == 'true'
         run: |
           docker buildx imagetools create \
-            -t ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:latest \
-            ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-amd64 \
-            ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-arm64
+            -t ${{ needs.resolve.outputs.hub_user_lower }}/deepseek-harness:latest \
+            ${{ needs.resolve.outputs.hub_user_lower }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-amd64 \
+            ${{ needs.resolve.outputs.hub_user_lower }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-arm64
