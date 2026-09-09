@@ -99,10 +99,6 @@ RUN set -eux; \
     pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple; \
     pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn
 
-# ---- npm: use Tsinghua (TUNA) registry mirror ----
-RUN set -eux; \
-    npm config set registry https://mirrors.tuna.tsinghua.edu.cn/npm/
-
 # ---- Node.js (NodeSource) - TUNA mirror first, official fallback ----
 RUN set -eux; \
     if curl -fsSL --max-time 20 "https://mirrors.tuna.tsinghua.edu.cn/nodesource/gpgkey/nodesource.gpg.key" -o /tmp/ns.key 2>/dev/null; then \
@@ -180,6 +176,7 @@ RUN set -eux; \
 # When "latest", npm resolves the newest published @deepseek-ai/dsh.
 ARG DSH_VERSION=latest
 RUN set -eux; \
+    npm config set registry https://mirrors.tuna.tsinghua.edu.cn/npm/; \
     npm install -g --unsafe-perm "@deepseek-ai/dsh@${DSH_VERSION}"; \
     npm install -g --unsafe-perm pnpm; \
     rm -rf /root/.npm; \
