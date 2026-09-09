@@ -1,8 +1,14 @@
 # syntax=docker/dockerfile:1
 ###############################################################################
-# DeepSeek Harness — Debian-based image
+# DeepSeek Harness - Debian-based image
 #
-# Provides: git, wget, curl, Node.js, Caddy (TLS + basic auth), gosu
+# Provides: git, wget, curl, Node.js(+npm/pnpm), Python(+pip), full C/C++
+#          toolchain, Caddy (TLS + basic auth), gosu, GitHub CLI (gh).
+#
+# Package mirrors: Tsinghua (TUNA) mirrors preferred for apt / npm / pip;
+# every external fetch falls back to the official source if the mirror
+# is unreachable, so builds keep working anywhere.
+#
 # Runs two processes via docker-entrypoint.sh:
 #   1. dsh  web server   (127.0.0.1:3080)
 #   2. caddy reverse proxy  (:8443, HTTPS + basic auth) -> 127.0.0.1:3080
@@ -16,13 +22,30 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG NODE_MAJOR=22
 ARG CADDY_VERSION=2.11.4
 ARG GOSU_VERSION=1.17
+ARG GH_VERSION=latest
+
+# ---- apt: switch to Tsinghua (TUNA) Debian mirrors ----
+# The stock sources.list is backed up first; if TUNA is unreachable the
+# backup is restored and apt falls back to the official Debian mirrors.
+RUN set -eux; \
+    cp /etc/apt/sources.list /tmp/sources.list.official; \
+    printf '%s\n' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main contrib non-free non-free-firmware' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/debian-security/ bookworm-security main contrib non-free non-free-firmware' \
+        > /etc/apt/sources.list; \
+    if ! apt-get update; then \
+        echo "TUNA apt mirror failed, falling back to official Debian mirrors"; \
+        cp /tmp/sources.list.official /etc/apt/sources.list; \
+        apt-get update; \
+    fi; \
+    rm -f /tmp/sources.list.official
 
 # ---- Base packages: git, wget, curl ----
 # Includes the full C/C++ toolchain, Python + pip, and common build headers.
 # NOTE: no '#' comments are placed inside the apt argument stream, because a
 # '#' in a shell-continued argument list would swallow the rest of the line.
 RUN set -eux; \
-    apt-get update; \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         gnupg \
@@ -62,12 +85,33 @@ RUN set -eux; \
         zlib1g-dev; \
     rm -rf /var/lib/apt/lists/*
 
-# ---- Node.js (NodeSource), installed globally ----
+# ---- pip: use Tsinghua (TUNA) PyPI mirror ----
 RUN set -eux; \
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource_setup.sh; \
-    bash /tmp/nodesource_setup.sh; \
+    pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple; \
+    pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn
+
+# ---- npm: use Tsinghua (TUNA) registry mirror ----
+RUN set -eux; \
+    npm config set registry https://mirrors.tuna.tsinghua.edu.cn/npm/
+
+# ---- Node.js (NodeSource) - TUNA mirror first, official fallback ----
+RUN set -eux; \
+    if curl -fsSL --max-time 20 "https://mirrors.tuna.tsinghua.edu.cn/nodesource/gpgkey/nodesource.gpg.key" -o /tmp/ns.key 2>/dev/null; then \
+        install -d -m 0755 /usr/share/keyrings; \
+        gpg --dearmor -o /usr/share/keyrings/nodesource.gpg < /tmp/ns.key; \
+        echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://mirrors.tuna.tsinghua.edu.cn/nodesource/deb bookworm main" > /etc/apt/sources.list.d/nodesource.list; \
+        if ! (apt-get update && apt-cache show nodejs >/dev/null 2>&1); then \
+            echo "TUNA nodesource mirror invalid, falling back to official"; \
+            rm -f /etc/apt/sources.list.d/nodesource.list /usr/share/keyrings/nodesource.gpg; \
+        fi; \
+    fi; \
+    if [ ! -f /etc/apt/sources.list.d/nodesource.list ]; then \
+        curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource_setup.sh; \
+        bash /tmp/nodesource_setup.sh; \
+    fi; \
+    apt-get update; \
     apt-get install -y --no-install-recommends nodejs; \
-    rm -f /tmp/nodesource_setup.sh; \
+    rm -f /tmp/ns.key /tmp/nodesource_setup.sh; \
     rm -rf /var/lib/apt/lists/*
 
 # ---- gosu (run processes as unprivileged users) ----
@@ -79,7 +123,9 @@ RUN set -eux; \
         armhf)  gosu_arch="armhf" ;; \
         *)      echo "Unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${gosu_arch}" -o /usr/local/bin/gosu; \
+    if ! curl -fsSL --max-time 60 "https://mirrors.tuna.tsinghua.edu.cn/github-release/tianon/gosu/v${GOSU_VERSION}/gosu-${gosu_arch}" -o /usr/local/bin/gosu; then \
+        curl -fsSL "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${gosu_arch}" -o /usr/local/bin/gosu; \
+    fi; \
     chmod +x /usr/local/bin/gosu
 
 # ---- Caddy (includes caddyfile adapter + automatic local PKI) ----
@@ -91,13 +137,36 @@ RUN set -eux; \
         armhf)  caddy_arch="armv7" ;; \
         *)      echo "Unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${caddy_arch}.tar.gz" -o /tmp/caddy.tar.gz; \
+    if ! curl -fsSL --max-time 120 "https://mirrors.tuna.tsinghua.edu.cn/github-release/caddyserver/caddy/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${caddy_arch}.tar.gz" -o /tmp/caddy.tar.gz; then \
+        curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${caddy_arch}.tar.gz" -o /tmp/caddy.tar.gz; \
+    fi; \
     tar -xzf /tmp/caddy.tar.gz -C /usr/bin caddy; \
     chmod +x /usr/bin/caddy; \
     rm -f /tmp/caddy.tar.gz; \
     caddy version
 
-# ---- Install @deepseek-ai/dsh (CLI + web UI) globally ----
+# ---- GitHub CLI (gh) - TUNA github-release mirror first, official fallback ----
+RUN set -eux; \
+    arch="$(dpkg --print-architecture | awk -F- '{ print $NF }')"; \
+    case "$arch" in \
+        amd64)  gh_arch="amd64" ;; \
+        arm64)  gh_arch="arm64" ;; \
+        armhf)  gh_arch="armv7" ;; \
+        *)      echo "Unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    if [ "${GH_VERSION}" = "latest" ]; then \
+        GH_VERSION="$(curl -fsSL --max-time 20 https://api.github.com/repos/cli/cli/releases/latest | grep -oE '\"tag_name\":[^,]*' | grep -oE 'v[0-9.]+' | head -1)"; \
+    fi; \
+    VER="${GH_VERSION#v}"; \
+    if ! curl -fsSL --max-time 120 "https://mirrors.tuna.tsinghua.edu.cn/github-release/cli/cli/v${VER}/gh_${VER}_linux_${gh_arch}.tar.gz" -o /tmp/gh.tar.gz; then \
+        curl -fsSL --max-time 300 "https://github.com/cli/cli/releases/download/v${VER}/gh_${VER}_linux_${gh_arch}.tar.gz" -o /tmp/gh.tar.gz; \
+    fi; \
+    tar -xzf /tmp/gh.tar.gz -C /usr/bin --strip-components=2 "gh_${VER}_linux_${gh_arch}/bin/gh"; \
+    chmod +x /usr/bin/gh; \
+    rm -f /tmp/gh.tar.gz; \
+    gh --version
+
+# ---- Install @deepseek-ai/dsh (CLI + web UI) globally via TUNA npm ----
 # DSH_VERSION defaults to "latest"; pass --build-arg DSH_VERSION=<ver> to pin.
 # When "latest", npm resolves the newest published @deepseek-ai/dsh.
 ARG DSH_VERSION=latest

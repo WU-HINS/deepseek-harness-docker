@@ -3,12 +3,17 @@
 Run the **DeepSeek Harness** web UI in a container with a TLS reverse proxy and
 basic-auth front door. The image is built from `debian:bookworm-slim` with:
 
-- **Node.js** 22 (LTS) + **pnpm**
+- **Node.js** 22 (LTS) + **npm** + **pnpm**
 - **Python 3** + **pip** + venv
 - Full **C/C++ toolchain**: gcc, g++, make, cmake, ninja, autoconf, libtool ...
 - **git**, **wget**, **curl**, and other base utilities
 - **Caddy** -- HTTPS reverse proxy + local CA + basic auth
 - **gosu** -- privilege dropping for the caddy process
+- **GitHub CLI (gh)**
+
+Package installation uses the **Tsinghua (TUNA) mirrors** for apt, npm and pip
+by default, and automatically falls back to the official upstream sources if
+a mirror is unreachable, so builds work anywhere.
 
 At runtime two processes are managed by `docker-entrypoint.sh`:
 
@@ -67,6 +72,7 @@ Other build args (defaults shown):
 | `NODE_MAJOR`        | `22`          | Node.js major version                   |
 | `CADDY_VERSION`     | `2.11.4`       | Caddy release to fetch                  |
 | `GOSU_VERSION`      | `1.17`        | gosu release to fetch                   |
+| `GH_VERSION`        | `latest`      | GitHub CLI (gh) release to install       |
 | `DSH_VERSION`       | `latest`      | `@deepseek-ai/dsh` version to install   |
 
 When `DSH_VERSION` is `latest`, npm resolves and installs the newest published
