@@ -171,12 +171,14 @@ RUN set -eux; \
     rm -f /tmp/gh.tar.gz; \
     gh --version
 
-# ---- Install @deepseek-ai/dsh (CLI + web UI) globally via TUNA npm ----
+# ---- Install @deepseek-ai/dsh (CLI + web UI) globally via npmmirror ----
+# TUNA's npm mirror does not carry the scoped @deepseek-ai packages (404), so
+# npm uses npmmirror (registry.npmmirror.com), which mirrors the full registry.
 # DSH_VERSION defaults to "latest"; pass --build-arg DSH_VERSION=<ver> to pin.
 # When "latest", npm resolves the newest published @deepseek-ai/dsh.
 ARG DSH_VERSION=latest
 RUN set -eux; \
-    npm config set registry https://mirrors.tuna.tsinghua.edu.cn/npm/; \
+    npm config set registry https://registry.npmmirror.com/; \
     npm install -g --unsafe-perm "@deepseek-ai/dsh@${DSH_VERSION}"; \
     npm install -g --unsafe-perm pnpm; \
     rm -rf /root/.npm; \
