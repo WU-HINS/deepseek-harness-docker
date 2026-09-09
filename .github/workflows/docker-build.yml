@@ -1,0 +1,186 @@
+# Build and push multi-arch Docker images for DeepSeek Harness.
+#
+# Triggers:
+#   - schedule: every day at 03:00 UTC
+#   - workflow_dispatch: manual run (optionally pin DSH_VERSION)
+#
+# Targets:
+#   - GitHub Container Registry (ghcr.io) - always pushed (GitHub-provided)
+#   - Docker Hub - pushed ONLY when DOCKERHUB_USERNAME + DOCKERHUB_TOKEN
+#     secrets are both configured (otherwise skipped)
+#
+# Image tagging:
+#   - <version>  : the dsh version (manual input or auto-resolved latest)
+#   - latest     : pushed only when the version was auto-resolved (not pinned)
+#
+# Multi-arch: native builds on GitHub-hosted runners
+#   - linux/amd64 -> ubuntu-24.04
+#   - linux/arm64 -> ubuntu-24.04-arm  (GitHub ARM runner)
+
+name: docker-build
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      dsh_version:
+        description: 'DSH version to build (e.g. 0.1.1-rc.2). Leave empty to auto-resolve the latest release.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve DSH version
+    runs-on: ubuntu-latest
+    outputs:
+      dsh_version: ${{ steps.version.outputs.dsh_version }}
+      push_latest: ${{ steps.latest.outputs.push_latest }}
+      push_dockerhub: ${{ steps.hub.outputs.push_dockerhub }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve DSH version
+        id: version
+        run: |
+          if [ -n "${{ inputs.dsh_version }}" ]; then
+            echo "dsh_version=${{ inputs.dsh_version }}" >> "$GITHUB_OUTPUT"
+            echo "Using pinned DSH version: ${{ inputs.dsh_version }}"
+          else
+            VER="$(npm view @deepseek-ai/dsh version)"
+            echo "dsh_version=${VER}" >> "$GITHUB_OUTPUT"
+            echo "Auto-resolved latest DSH version: ${VER}"
+          fi
+
+      - name: Decide whether to push 'latest' tag
+        id: latest
+        run: |
+          if [ -z "${{ inputs.dsh_version }}" ]; then
+            echo "push_latest=true" >> "$GITHUB_OUTPUT"
+            echo "Version auto-resolved -> will also push 'latest'"
+          else
+            echo "push_latest=false" >> "$GITHUB_OUTPUT"
+            echo "Version pinned manually -> will NOT overwrite 'latest'"
+          fi
+
+      - name: Decide whether to push to Docker Hub
+        id: hub
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "push_dockerhub=true" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub credentials found -> will push to Docker Hub"
+          else
+            echo "push_dockerhub=false" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub credentials missing -> skipping Docker Hub"
+          fi
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub (conditional)
+        if: needs.resolve.outputs.push_dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.platform }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            DSH_VERSION=${{ needs.resolve.outputs.dsh_version }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-${{ matrix.suffix }}
+            ${{ secrets.DOCKERHUB_USERNAME != '' && needs.resolve.outputs.push_dockerhub == 'true' && format('{0}/deepseek-harness:{1}-{2}', secrets.DOCKERHUB_USERNAME, needs.resolve.outputs.dsh_version, matrix.suffix) || '' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.dsh_version }}
+
+  merge:
+    name: Merge multi-arch manifest
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub (conditional)
+        if: needs.resolve.outputs.push_dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Merge GHCR manifest (version tag)
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }} \
+            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-amd64 \
+            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-arm64
+
+      - name: Merge GHCR manifest (latest tag)
+        if: needs.resolve.outputs.push_latest == 'true'
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${{ github.repository }}:latest \
+            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-amd64 \
+            ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.dsh_version }}-arm64
+
+      - name: Merge Docker Hub manifest (version tag)
+        if: needs.resolve.outputs.push_dockerhub == 'true'
+        run: |
+          docker buildx imagetools create \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }} \
+            ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-amd64 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-arm64
+
+      - name: Merge Docker Hub manifest (latest tag)
+        if: needs.resolve.outputs.push_dockerhub == 'true' && needs.resolve.outputs.push_latest == 'true'
+        run: |
+          docker buildx imagetools create \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:latest \
+            ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-amd64 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/deepseek-harness:${{ needs.resolve.outputs.dsh_version }}-arm64

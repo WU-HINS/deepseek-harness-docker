@@ -1,0 +1,54 @@
+# DeepSeek Harness - docker compose
+#
+# Builds and runs the DeepSeek Harness container using relative mounts
+# under the current directory (no 1Panel custom mounts).
+#
+# Usage:
+#   cp .env.example .env   # then edit HTTPS_ACCESS_HOST / DSH_AUTH_* / port
+#   docker compose up -d --build
+#
+# Data directories are created relative to this file:
+#   ./data/dsh      - dsh home / profile state
+#   ./data/caddy    - Caddy config + local CA cert (pki/authorities/local/root.crt)
+#   ./workspace     - shared workspace the agents operate in
+
+services:
+  deepseek-harness:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deepseek-harness:local
+    container_name: ${CONTAINER_NAME:-deepseek-harness}
+    restart: unless-stopped
+    environment:
+      DSH_AUTH_PASSWORD: ${DSH_AUTH_PASSWORD:?DSH_AUTH_PASSWORD is required (>= 12 chars)}
+      DSH_AUTH_USERNAME: ${DSH_AUTH_USERNAME:?DSH_AUTH_USERNAME is required}
+      DSH_HOME: /data/dsh
+      DSH_TELEMETRY_DISABLED: "1"
+      HTTPS_ACCESS_HOST: ${HTTPS_ACCESS_HOST:?HTTPS_ACCESS_HOST is required (IPv4 or hostname, no scheme/port)}
+    ports:
+      - "${HTTPS_PORT:-8443}:8443"
+    volumes:
+      - ./data/dsh:/data/dsh
+      - ./data/caddy:/data/caddy
+      - ./workspace:/workspace
+      - /etc/localtime:/etc/localtime:ro
+    tmpfs:
+      - /tmp:mode=1777,size=256m
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://127.0.0.1:3080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPUS:-2}
+          memory: ${MEMORY_LIMIT:-2g}
+
+networks:
+  default:
+    name: deepseek-harness

@@ -1,0 +1,23 @@
+# Caddy reverse proxy for DeepSeek Harness.
+#
+# Listens on HTTPS port 8443 using Caddy's local/internal CA so the
+# container works with IP addresses and hostnames alike (no public ACME).
+# The CA root certificate is stored by Caddy at:
+#   /data/caddy/pki/authorities/local/root.crt
+#
+# Env placeholders are substituted by Caddy at config load:
+#   CADDY_ACCESS_HOST      - the HTTPS_ACCESS_HOST value (validated by entrypoint)
+#   DSH_AUTH_USERNAME      - basic auth username
+#   DSH_AUTH_PASSWORD_HASH - argon2id hash from 'caddy hash-password'
+{
+	admin off
+	local_certs
+}
+
+https://{$CADDY_ACCESS_HOST}:8443 {
+	basic_auth {
+		{$DSH_AUTH_USERNAME} {$DSH_AUTH_PASSWORD_HASH}
+	}
+
+	reverse_proxy 127.0.0.1:3080
+}

@@ -1,0 +1,10 @@
+# Do not copy these into the build context
+data/
+workspace/
+.github/
+.env
+.env.*
+!.env.example
+*.log
+.git/
+.DS_Store
