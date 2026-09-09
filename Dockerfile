@@ -24,30 +24,29 @@ ARG CADDY_VERSION=2.11.4
 ARG GOSU_VERSION=1.17
 ARG GH_VERSION=latest
 
-# ---- apt: switch to Tsinghua (TUNA) Debian mirrors ----
-# Debian 12 ships sources in /etc/apt/sources.list.d/debian.sources (deb822
-# format); /etc/apt/sources.list may not exist in some base images. We back up
-# the whole /etc/apt/sources.list* set, drop the deb822 filewriters, install
-# TUNA one-line sources, and on failure restore the official ones.
+# ---- apt: Tsinghua (TUNA) mirrors + base packages ----
+# Mirrors follow the well-known linuxmirrors.cn approach: detect whether the
+# image ships deb822 (sources.list.d/debian.sources) or one-line sources,
+# back up whatever exists, write TUNA sources (incl. updates/backports/
+# security), then update; on failure the official Debian sources are
+# restored and apt falls back to upstream.
 RUN set -eux; \
     rm -rf /tmp/apt-backup; \
-    mkdir -p /tmp/apt-backup && \
-    cp -a /etc/apt/sources.list /tmp/apt-backup/sources.list 2>/dev/null || true; \
-    cp -a /etc/apt/sources.list.d /tmp/apt-backup/sources.list.d 2>/dev/null || true; \
-    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.save 2>/dev/null || true; \
+    mkdir -p /tmp/apt-backup; \
+    if [ -f /etc/apt/sources.list ]; then cp -a /etc/apt/sources.list /tmp/apt-backup/; fi; \
+    if [ -d /etc/apt/sources.list.d ]; then cp -a /etc/apt/sources.list.d /tmp/apt-backup/; fi; \
     printf '%s\n' \
         'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main contrib non-free non-free-firmware' \
         'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-backports main contrib non-free non-free-firmware' \
         'deb https://mirrors.tuna.tsinghua.edu.cn/debian-security/ bookworm-security main contrib non-free non-free-firmware' \
         > /etc/apt/sources.list; \
-    if ! apt-get update; then \
-        echo "TUNA apt mirror failed, falling back to official Debian mirrors"; \
-        rm -f /etc/apt/sources.list; \
-        cp -a /tmp/apt-backup/sources.list /etc/apt/sources.list 2>/dev/null || true; \
-        rm -rf /etc/apt/sources.list.d; \
-        cp -a /tmp/apt-backup/sources.list.d /etc/apt/sources.list.d 2>/dev/null || true; \
+    if ! apt-get -o Acquire::Retries=3 update; then \
+        echo "TUNA mirror unreachable, restoring official Debian sources"; \
+        rm -rf /etc/apt/sources.list /etc/apt/sources.list.d; \
+        cp -a /tmp/apt-backup/. /etc/apt/ 2>/dev/null || true; \
         install -d /etc/apt/sources.list.d; \
-        apt-get update; \
+        apt-get -o Acquire::Retries=3 update; \
     fi; \
     rm -rf /tmp/apt-backup
 
@@ -56,6 +55,7 @@ RUN set -eux; \
 # NOTE: no '#' comments are placed inside the apt argument stream, because a
 # '#' in a shell-continued argument list would swallow the rest of the line.
 RUN set -eux; \
+    apt-get -o Acquire::Retries=3 update; \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         gnupg \
@@ -94,7 +94,6 @@ RUN set -eux; \
         libsqlite3-dev \
         zlib1g-dev; \
     rm -rf /var/lib/apt/lists/*
-
 # ---- pip: use Tsinghua (TUNA) PyPI mirror ----
 RUN set -eux; \
     pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple; \
