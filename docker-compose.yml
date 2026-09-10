@@ -30,6 +30,12 @@ services:
       - "${HTTPS_PORT:-8443}:8443"
     volumes:
       - ./data/dsh:/data/dsh
+      # Persist the global dsh dependency/plugin tree across upgrades.
+      # dsh's own lib/ and package.json stay in the image layer (updated with
+      # the image); node_modules here is a volume so plugin-market packages
+      # survive image upgrades. Seeded/merged by docker-entrypoint.sh from
+      # /opt/dsh-pristine/node_modules.
+      - ./data/dsh/node-modules:/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules
       - ./data/caddy:/data/caddy
       - ./workspace:/workspace
       - /etc/localtime:/etc/localtime:ro

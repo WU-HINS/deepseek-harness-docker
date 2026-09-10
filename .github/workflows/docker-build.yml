@@ -61,8 +61,20 @@ jobs:
             echo "Using pinned DSH version: ${{ inputs.dsh_version }}"
           else
             VER="$(npm view @deepseek-ai/dsh version)"
+            # The pre-release `alpha` channel (0.1.5-alpha.2) bundles the
+            # not-yet-published plugin dsh-trusted-host-proxy-403-fix and fails
+            # to boot lethally. Never auto-promote it as `latest`; if upstream
+            # ever retags a pre-release as latest, refuse it here so the build
+            # stays on the last stable release instead of shipping a broken image.
+            case "$VER" in
+              *-alpha.*|*-beta.*)
+                PRE="$VER"
+                VER="$(npm view @deepseek-ai/dsh versions --json 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const v=JSON.parse(d);process.stdout.write(v.filter(x=>!/-alpha\.|-beta\./.test(x)).pop()||"")})')"
+                echo "WARNING: latest tag points at pre-release channel ${PRE}; falling back to stable ${VER}" >&2
+                ;;
+            esac
             echo "dsh_version=${VER}" >> "$GITHUB_OUTPUT"
-            echo "Auto-resolved latest DSH version: ${VER}"
+            echo "Auto-resolved DSH version: ${VER}"
           fi
 
       - name: Decide whether to push 'latest' tag

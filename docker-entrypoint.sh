@@ -50,6 +50,54 @@ install -d -m 0700 -o root -g root /data/dsh /data/dsh/home
 install -d -m 0750 -o root -g root /workspace
 install -d -m 0700 -o caddy -g caddy /data/caddy /data/caddy/config
 
+# The dependency directory is NOT designed to be persisted: the shared
+# $DSH_HOME/profiles/node_modules mirror and each profile's .dsh-module-fallback
+# exist only to mirror the *current* global dsh installation, and dsh regenerates
+# both on every boot (healProfilesModuleFallback). When the image's dsh version
+# changes, a stale fallback state from an older install can carry a plugin tree
+# that no longer matches the new installation (e.g. plugin-market plugins whose
+# peer packages are missing) and break startup with ERR_MODULE_NOT_FOUND.
+# Wipe that generated state here so dsh rebuilds it from the installed version
+# at boot. The per-profile node_modules is left untouched because it may hold
+# packages installed with `dsh plugin add` (persisted via pnpm).
+if [[ -d /data/dsh/profiles ]]; then
+  rm -rf /data/dsh/profiles/node_modules
+  find /data/dsh/profiles -mindepth 2 -maxdepth 2 -type d \
+    -name .dsh-module-fallback -exec rm -rf {} + 2>/dev/null || true
+fi
+
+# Seed / merge the persisted global dependency tree. The image mounts a volume
+# over $DSH_NM (docker-compose: ./data/dsh/node-modules) so plugin-market
+# packages survive image upgrades; the volume is empty on first boot and holds
+# the previous image's tree on an upgrade. /opt/dsh-pristine/node_modules is a
+# snapshot of THIS image's own tree: when the image's dsh version changes, copy
+# it over so the new image's official packages win while extra packages (user
+# plugins) stay. A version stamp avoids re-copying on every restart. dsh's own
+# lib/ and package.json live outside node_modules, so the dsh core is still
+# updated by the image itself (dsh本体不持久).
+DSH_NM=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules
+PRISTINE=/opt/dsh-pristine/node_modules
+DSH_VER="$(node -p "require('/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
+DSH_STAMP="$DSH_NM/.dsh-merged-version"
+if [[ -d "$PRISTINE" ]]; then
+  mkdir -p "$DSH_NM"
+  if [[ ! -f "$DSH_STAMP" ]] || [[ "$(cat "$DSH_STAMP" 2>/dev/null)" != "$DSH_VER" ]]; then
+    cp -a "$PRISTINE/." "$DSH_NM/"
+    printf '%s' "$DSH_VER" > "$DSH_STAMP"
+    echo "Merged dsh ${DSH_VER} node_modules into the persistent volume."
+  else
+    echo "Persistent node_modules already at dsh ${DSH_VER}; skipping merge."
+  fi
+else
+  echo "WARNING: /opt/dsh-pristine/node_modules missing; global node_modules not seeded." >&2
+fi
+# Fail loudly instead of shipping an image whose `dsh` shim points at a missing
+# entry point (Cannot find module .../dsh/lib/bin.js).
+test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js || {
+  echo "ERROR: /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js is missing" >&2
+  exit 1
+}
+
 pids=()
 cleanup() {
   if (( ${#pids[@]} )); then

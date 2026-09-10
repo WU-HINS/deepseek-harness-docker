@@ -174,15 +174,27 @@ RUN set -eux; \
 # ---- Install @deepseek-ai/dsh (CLI + web UI) globally via npmmirror ----
 # TUNA's npm mirror does not carry the scoped @deepseek-ai packages (404), so
 # npm uses npmmirror (registry.npmmirror.com), which mirrors the full registry.
-# DSH_VERSION defaults to "latest"; pass --build-arg DSH_VERSION=<ver> to pin.
-# When "latest", npm resolves the newest published @deepseek-ai/dsh.
-ARG DSH_VERSION=latest
+# DSH_VERSION defaults to the stable `latest` dist-tag (0.1.2-rc.1) and is pinned
+# explicitly so the build can never drift onto the pre-release `alpha` channel
+# (0.1.5-alpha.2), whose web bundle references a plugin tree that fails to boot
+# against the published stable packages. Pass --build-arg DSH_VERSION=<ver> to
+# override.
+ARG DSH_VERSION=0.1.2-rc.1
 RUN set -eux; \
     npm config set registry https://registry.npmmirror.com/; \
-    npm install -g --unsafe-perm "@deepseek-ai/dsh@${DSH_VERSION}"; \
-    npm install -g --unsafe-perm pnpm; \
+    npm install -g --no-audit --no-fund --unsafe-perm "@deepseek-ai/dsh@${DSH_VERSION}"; \
+    npm install -g --no-audit --no-fund --unsafe-perm pnpm; \
     rm -rf /root/.npm; \
-    dsh --version && pnpm --version
+    # Fail the build loudly instead of shipping an image whose `dsh` shim points
+    # at a missing entry point (Cannot find module .../dsh/lib/bin.js).
+    test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js || { \
+        echo "ERROR: @deepseek-ai/dsh@${DSH_VERSION} installed without lib/bin.js" >&2; \
+        ls -la /usr/local/lib/node_modules/@deepseek-ai/dsh/ /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/ >&2; \
+        exit 1; \
+    }; \
+    installed="$(dsh --version)"; \
+    echo "installed dsh: ${installed} (wanted ${DSH_VERSION})"; \
+    pnpm --version
 
 # ---- Runtime users: caddy (runs reverse proxy). dsh runs as root. ----
 # Group name MUST be 'caddy': the entrypoint uses -o caddy -g caddy in install.
@@ -193,6 +205,32 @@ RUN set -eux; \
     install -d -m 0750 /workspace && \
     install -d -m 0700 -o caddy -g caddy /data/caddy /data/caddy/config && \
     mkdir -p /etc/caddy
+
+# ---- /root -> /data/dsh: keep auth and $HOME state in the persistent volume ----
+# git/gh credentials, ssh keys, npm/pnpm caches and every other tool that
+# writes under $HOME default to /root (the container writable layer), which is
+# lost on container reset. /data/dsh is a mounted volume, so point /root at it:
+# the running container always sees the volume there, while the image keeps a
+# normal root home for the build itself.
+RUN set -eux; \
+    rm -rf /root; \
+    ln -s /data/dsh /root
+
+# ---- Pristine copy of the dsh dependency tree (upgrade/seed base) ----
+# At runtime the container mounts a persistent volume over
+# /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules so plugin-market
+# packages and dependencies survive image upgrades (dsh's own lib/ and
+# package.json stay in the image layer and update with the image). Keep a
+# pristine snapshot of the image's dependency tree here; the entrypoint seeds
+# the volume from it on first boot and merges it on upgrades (new image's
+# official packages win, extra packages such as user plugins are kept).
+# The version stamp lets an anonymous volume (docker run) skip a redundant
+# first-boot copy, while an empty bind mount (docker-compose) still seeds.
+RUN set -eux; \
+    install -d /opt/dsh-pristine; \
+    cp -a /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules /opt/dsh-pristine/node_modules; \
+    node -p "require('/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json').version" \
+      > /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/.dsh-merged-version
 
 # ---- Caddyfile for the TLS reverse proxy ----
 COPY Caddyfile /etc/caddy/Caddyfile
@@ -211,6 +249,10 @@ ENV DSH_HOME=/data/dsh \
 # Exposed HTTPS port (mapped in docker-compose to PANEL_APP_PORT_HTTPS)
 EXPOSE 8443
 
-VOLUME ["/data/dsh", "/data/caddy", "/workspace"]
+# Persistent state. The dsh node_modules volume keeps plugin-market packages and
+# their dependencies across image upgrades; docker-compose bind-mounts it at
+# ./data/dsh/node-modules, and the entrypoint seeds/merges it from
+# /opt/dsh-pristine on start.
+VOLUME ["/data/dsh", "/data/caddy", "/workspace", "/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
