@@ -145,8 +145,11 @@ jobs:
           context: .
           push: true
           platforms: ${{ matrix.platform }}
+          # GitHub-hosted runners reach npmmirror (a China mirror) slowly and
+          # can time out mid-install, so CI builds against the official registry.
           build-args: |
             DSH_VERSION=${{ needs.resolve.outputs.dsh_version }}
+            NPM_REGISTRY=https://registry.npmjs.org/
           tags: |
             ghcr.io/${{ env.REPO_LOWER }}:${{ needs.resolve.outputs.dsh_version }}-${{ matrix.suffix }}
             ${{ needs.resolve.outputs.push_dockerhub == 'true' && format('{0}/deepseek-harness:{1}-{2}', secrets.DOCKERHUB_USERNAME, needs.resolve.outputs.dsh_version, matrix.suffix) || '' }}

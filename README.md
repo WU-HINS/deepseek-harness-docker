@@ -74,12 +74,18 @@ Other build args (defaults shown):
 | `GOSU_VERSION`      | `1.17`        | gosu release to fetch                   |
 | `GH_VERSION`        | `latest`      | GitHub CLI (gh) release to install       |
 | `DSH_VERSION`       | `0.1.2-rc.1`  | `@deepseek-ai/dsh` version to install   |
+| `NPM_REGISTRY`      | `https://registry.npmmirror.com/` | npm registry for the dsh/pnpm install |
+| `PNPM_VERSION`      | `10`          | pnpm major version to install globally  |
 
 The `DSH_VERSION` default is pinned to the stable `latest` dist-tag (`0.1.2-rc.1`).
 Pinning matters: the pre-release `alpha` channel (`0.1.5-alpha.2`) carries a
 plugin tree that fails to boot against the published stable packages. Override
 with `--build-arg DSH_VERSION=<ver>` only when you intend to test a specific
 pre-release.
+
+The npm registry defaults to npmmirror (fast inside China). GitHub Actions CI
+overrides it with the official `registry.npmjs.org`, because GitHub-hosted
+runners reach the China mirror slowly and can time out mid-install.
 
 ---
 
