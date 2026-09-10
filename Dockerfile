@@ -188,26 +188,21 @@ ARG PNPM_VERSION=10
 RUN set -eux; \
     npm_config_registry="$NPM_REGISTRY"; \
     export npm_config_registry; \
-    npm install -g --no-audit --no-fund --unsafe-perm \
+    npm install -g --prefix=/usr/local --no-audit --no-fund --unsafe-perm \
       --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-timeout=300000 \
-      "@deepseek-ai/dsh@${DSH_VERSION}" || { \
-        echo "ERROR: npm install of @deepseek-ai/dsh@${DSH_VERSION} failed" >&2; \
-        log="$(ls -t /root/.npm/_logs/*-debug-0.log 2>/dev/null | head -1)"; \
-        if [[ -n "$log" ]]; then echo "--- npm debug log ($log) ---" >&2; tail -80 "$log" >&2; fi; \
-        exit 1; \
-    }; \
-    npm install -g --no-audit --no-fund --unsafe-perm \
-      --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-timeout=300000 \
-      "pnpm@${PNPM_VERSION}" || { \
-        echo "ERROR: npm install of pnpm@${PNPM_VERSION} failed" >&2; \
+      "@deepseek-ai/dsh@${DSH_VERSION}" "pnpm@${PNPM_VERSION}" || { \
+        echo "ERROR: npm install -g failed" >&2; \
+        echo "npm root -g: $(npm root -g)" >&2; \
         log="$(ls -t /root/.npm/_logs/*-debug-0.log 2>/dev/null | head -1)"; \
         if [[ -n "$log" ]]; then echo "--- npm debug log ($log) ---" >&2; tail -80 "$log" >&2; fi; \
         exit 1; \
     }; \
     rm -rf /root/.npm; \
+    echo "npm root -g: $(npm root -g)"; \
+    echo "dsh bin.js: $(find /usr/local/lib/node_modules -path '*@deepseek-ai/dsh/lib/bin.js' -print -quit 2>/dev/null)"; \
     test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js || { \
         echo "ERROR: @deepseek-ai/dsh@${DSH_VERSION} installed without lib/bin.js" >&2; \
-        ls -la /usr/local/lib/node_modules/@deepseek-ai/dsh/ /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/ >&2; \
+        ls -la /usr/local/lib/node_modules/@deepseek-ai/ /usr/local/lib/node_modules/@deepseek-ai/dsh/ /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/ >&2; \
         exit 1; \
     }; \
     installed="$(dsh --version)"; \
