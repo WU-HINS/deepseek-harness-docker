@@ -62,6 +62,13 @@ is_wildcard_host() {
   esac
 }
 
+is_truthy() {
+  case "${1,,}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------
@@ -87,6 +94,13 @@ if [[ "${1:-}" == "--self-test" ]]; then
   is_wildcard_host ::
   ! is_wildcard_host 127.0.0.1
   ! is_wildcard_host 192.168.1.10
+  is_truthy 1
+  is_truthy TRUE
+  is_truthy yes
+  is_truthy on
+  ! is_truthy 0
+  ! is_truthy false
+  ! is_truthy ""
   echo "self-test: OK"
   exit 0
 fi
@@ -171,17 +185,21 @@ echo "dsh listen ${dsh_host}:${dsh_port} -> Caddy upstream ${DSH_UPSTREAM} (trus
 # ---------------------------------------------------------------------------
 # Caddy proxy mode
 # ---------------------------------------------------------------------------
-# Caddy always targets loopback, so there is no "chained proxy in front"
-# scenario to accommodate: proxy_local is the right default in every
-# supported case. Passthrough mode remains selectable via DSH_PROXY_SNIPPET
-# for advanced setups (e.g. you really do run another proxy inside the
-# container and want the original headers preserved).
+# proxy_local (default):
+#   Caddy is the only ingress and owns the forwarding headers. The Host header
+#   is rewritten to the upstream address; X-Forwarded-For gets Caddy's peer
+#   appended; X-Real-IP is not set.
+#
+# proxy_passthrough (DSH_PRESERVE_HOST=true):
+#   Preserve the incoming Host header only. Everything else keeps Caddy's
+#   default behaviour (X-Forwarded-For still appended, X-Real-IP still unset).
+#
+# DSH_PROXY_SNIPPET can still be set explicitly to override both.
 
-if is_loopback_host "$dsh_host" || is_wildcard_host "$dsh_host"; then
-  : "${DSH_PROXY_SNIPPET:=proxy_local}"
+if is_truthy "${DSH_PRESERVE_HOST:-}"; then
+  : "${DSH_PROXY_SNIPPET:=proxy_passthrough}"
+  echo "DSH_PRESERVE_HOST enabled: Caddy will preserve the incoming Host header."
 else
-  # Bind is NIC-specific: loopback connection may fail. Keep the default
-  # proxy behaviour, but say so loudly.
   : "${DSH_PROXY_SNIPPET:=proxy_local}"
 fi
 export DSH_PROXY_SNIPPET
@@ -226,6 +244,16 @@ install -d -m 0700 -o caddy -g caddy /data/caddy /data/caddy/config
 # ---------------------------------------------------------------------------
 # Dependency tree: wipe generated state, then seed/merge the persistent volume
 # ---------------------------------------------------------------------------
+# The dependency directory is NOT designed to be persisted: the shared
+# $DSH_HOME/profiles/node_modules mirror and each profile's .dsh-module-fallback
+# exist only to mirror the *current* global dsh installation, and dsh
+# regenerates both on every boot (healProfilesModuleFallback). When the image's
+# dsh version changes, a stale fallback state from an older install can carry a
+# plugin tree that no longer matches the new installation and break startup
+# with ERR_MODULE_NOT_FOUND. Wipe that generated state here so dsh rebuilds it
+# from the installed version at boot. The per-profile node_modules is left
+# untouched because it may hold packages installed with `dsh plugin add`
+# (persisted via pnpm).
 
 if [[ -d /data/dsh/profiles ]]; then
   rm -rf /data/dsh/profiles/node_modules
@@ -233,6 +261,15 @@ if [[ -d /data/dsh/profiles ]]; then
     -name .dsh-module-fallback -exec rm -rf {} + 2>/dev/null || true
 fi
 
+# Seed / merge the persisted global dependency tree. The image mounts a volume
+# over $DSH_NM (docker-compose: ./data/dsh/node-modules) so plugin-market
+# packages survive image upgrades; the volume is empty on first boot and holds
+# the previous image's tree on an upgrade. /opt/dsh-pristine/node_modules is a
+# snapshot of THIS image's own tree: when the image's dsh version changes, copy
+# it over so the new image's official packages win while extra packages (user
+# plugins) stay. A version stamp avoids re-copying on every restart. dsh's own
+# lib/ and package.json live outside node_modules, so the dsh core is still
+# updated by the image itself (dsh本体不持久).
 DSH_NM=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules
 PRISTINE=/opt/dsh-pristine/node_modules
 DSH_STAMP="$DSH_NM/.dsh-merged-version"
