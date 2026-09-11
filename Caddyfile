@@ -18,7 +18,7 @@
 
 	servers {
 		# Only trust forwarding headers when the direct peer is a private
-		# address. This keeps a chained proxy on the LAN working (its
+		# address. This lets a chained proxy on the LAN work (its
 		# X-Forwarded-For / X-Real-IP are honoured) while ignoring headers
 		# coming from the public internet.
 		trusted_proxies static private_ranges
@@ -44,20 +44,21 @@
 }
 
 # Default proxy mode: Caddy is the only ingress, so it may set the forwarding
-# headers itself.
+# headers itself. This is Caddy's stock reverse_proxy behaviour:
+#   Host              -> rewritten to the upstream address
+#   X-Forwarded-For   -> Caddy's peer appended
+#   X-Forwarded-Proto -> https
+#   X-Real-IP         -> not set
 (proxy_local) {
 	reverse_proxy {$DSH_UPSTREAM:127.0.0.1:3080}
 }
 
-# Passthrough proxy mode: when dsh listens on a non-loopback address it is
-# also reachable through other paths, so Caddy must not rewrite the chain
-# info. Pass Host / X-Real-IP / X-Forwarded-For straight through (an absent
-# incoming header stays absent; an empty incoming header stays empty).
+# Passthrough proxy mode: preserve the incoming Host only. All other headers
+# keep Caddy's default behaviour (X-Forwarded-For still gets Caddy's peer
+# appended, X-Real-IP is still not set).
 (proxy_passthrough) {
 	reverse_proxy {$DSH_UPSTREAM:127.0.0.1:3080} {
 		header_up Host {http.request.host}
-		header_up X-Real-IP {http.request.header.X-Real-IP}
-		header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
 	}
 }
 
