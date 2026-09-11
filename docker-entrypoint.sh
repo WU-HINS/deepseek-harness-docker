@@ -136,8 +136,12 @@ fi
 dsh_host="${DSH_HOST:-127.0.0.1}"
 dsh_port="${DSH_PORT:-3080}"
 
-if [[ ! "$dsh_host" =~ ^[0-9A-Za-z._:\[\]-]+$ ]]; then
-  printf 'DSH_HOST must be an IP address or hostname (got: %s).\n' "$dsh_host" >&2
+# Accept IPv4, hostname, bare IPv6 (::1) and bracketed IPv6 ([::1]).
+# Kept loose on purpose: the previous character class used \[ \] inside
+# [[ =~ ]], which behaves inconsistently across ERE implementations and
+# rejected even plain values like 0.0.0.0.
+if [[ -z "$dsh_host" || "$dsh_host" =~ [[:space:]] || "$dsh_host" == */* ]]; then
+  printf 'DSH_HOST must be a non-empty address/hostname without whitespace or slash (got: %s).\n' "$dsh_host" >&2
   exit 1
 fi
 if [[ ! "$dsh_port" =~ ^[0-9]+$ ]] || (( dsh_port < 1 || dsh_port > 65535 )); then
