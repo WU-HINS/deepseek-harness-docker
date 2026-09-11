@@ -297,7 +297,7 @@ code=""
 for _ in {1..60}; do
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$probe_url" || true)"
   case "$code" in
-    200|401|403) ready=true; break ;;
+    200|401|403|301|302) ready=true; break ;;
   esac
   if ! kill -0 "$dsh_pid" 2>/dev/null; then
     wait "$dsh_pid"
