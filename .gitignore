@@ -1,0 +1,17 @@
+# gh CLI local state (device id, token cache)
+.local/
+
+# runtime data
+data/
+workspace/
+
+# environment
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+
+# os
+.DS_Store
