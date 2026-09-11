@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 is_access_host() {
   node -e '
     const { isIPv4 } = require("node:net");
@@ -11,7 +15,9 @@ is_access_host() {
   ' "$1"
 }
 
-# version_ge A B : exit 0 if A >= B (semver, incl. -rc.N prerelease)
+# version_ge A B : exit 0 if A >= B (semver, incl. -rc.N prerelease).
+# GNU `sort -V` mishandles prerelease ordering (0.1.5-rc.1 vs 0.1.5),
+# so parse it ourselves.
 version_ge() {
   node -e '
     const parse = (v) => {
@@ -45,6 +51,10 @@ version_ge() {
   ' "$1" "$2"
 }
 
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+
 if [[ "${1:-}" == "--self-test" ]]; then
   is_access_host 203.0.113.10
   is_access_host dsh.example.com
@@ -52,16 +62,26 @@ if [[ "${1:-}" == "--self-test" ]]; then
   ! is_access_host 203.0.113.10:10443
   ! is_access_host 203.0.113.999
   version_ge 0.1.5-rc.1 0.1.5-rc.1
-  version_ge 0.1.5       0.1.5-rc.1
-  version_ge 0.1.6       0.1.5-rc.1
-  ! version_ge 0.1.4     0.1.5-rc.1
+  version_ge 0.1.5      0.1.5-rc.1
+  version_ge 0.1.6      0.1.5-rc.1
+  version_ge 0.2.0      0.1.5-rc.1
+  ! version_ge 0.1.4      0.1.5-rc.1
   ! version_ge 0.1.2-rc.1 0.1.5-rc.1
+  echo "self-test: OK"
   exit 0
 fi
+
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
 
 printf '\033[1;32m%s\033[0m\n' 'This image is maintained by WUHINS.'
 printf '\033[1;33m%s\033[0m\n' 'For support or issue discussion, please visit:'
 printf '\033[1;36m%s\033[0m\n' 'https://github.com/WU-HINS/deepseek-harness-docker'
+
+# ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
 
 access_host="${HTTPS_ACCESS_HOST:-}"
 auth_username="${DSH_AUTH_USERNAME:-}"
@@ -82,23 +102,76 @@ if (( ${#auth_password} < 12 )); then
   exit 1
 fi
 
-password_hash="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
-unset HTTPS_ACCESS_HOST DSH_AUTH_USERNAME DSH_AUTH_PASSWORD auth_password
+# ---------------------------------------------------------------------------
+# Resolve dsh version early (drives Caddy auth mode)
+# ---------------------------------------------------------------------------
 
-install -d -m 0700 -o root -g root /data/dsh /data/dsh/home
-install -d -m 0750 -o root -g root /workspace
+DSH_VER="$(node -p "require('/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
+
+# dsh >= 0.1.5-rc.1 ships its own token auth; adding Caddy basic auth on top
+# only gets in the way.
+AUTH_SELF_MANAGED_MIN="0.1.5-rc.1"
+
+if version_ge "$DSH_VER" "$AUTH_SELF_MANAGED_MIN"; then
+  echo "dsh ${DSH_VER} >= ${AUTH_SELF_MANAGED_MIN}: dsh handles auth; disabling Caddy basic auth."
+  DSH_AUTH_SNIPPET=auth_disabled
+  caddy_auth_username=""
+  caddy_auth_password_hash=""
+else
+  echo "dsh ${DSH_VER} < ${AUTH_SELF_MANAGED_MIN}: enabling Caddy basic auth."
+  DSH_AUTH_SNIPPET=auth_protected
+  caddy_auth_username="$auth_username"
+  caddy_auth_password_hash="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
+fi
+
+# Caddy treats an undefined {$VAR} as a config-load error, so both auth vars
+# must be passed as (possibly empty) strings even when auth is disabled.
+export DSH_AUTH_SNIPPET
+export DSH_AUTH_USERNAME="$caddy_auth_username"
+export DSH_AUTH_PASSWORD_HASH="$caddy_auth_password_hash"
+
+unset HTTPS_ACCESS_HOST DSH_AUTH_USERNAME DSH_AUTH_PASSWORD auth_password
+unset caddy_auth_username caddy_auth_password_hash
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+
+install -d -m 0700 -o root  -g root  /data/dsh /data/dsh/home
+install -d -m 0750 -o root  -g root  /workspace
 install -d -m 0700 -o caddy -g caddy /data/caddy /data/caddy/config
 
-# ... 中间 profiles/node_modules 清理、pristine seed/merge 逻辑保持不变 ...
+# ---------------------------------------------------------------------------
+# Dependency tree: wipe generated state, then seed/merge the persistent volume
+# ---------------------------------------------------------------------------
+
+# The dependency directory is NOT designed to be persisted: the shared
+# $DSH_HOME/profiles/node_modules mirror and each profile's .dsh-module-fallback
+# exist only to mirror the *current* global dsh installation, and dsh regenerates
+# both on every boot (healProfilesModuleFallback). When the image's dsh version
+# changes, a stale fallback state from an older install can carry a plugin tree
+# that no longer matches the new installation (e.g. plugin-market plugins whose
+# peer packages are missing) and break startup with ERR_MODULE_NOT_FOUND.
+# Wipe that generated state here so dsh rebuilds it from the installed version
+# at boot. The per-profile node_modules is left untouched because it may hold
+# packages installed with `dsh plugin add` (persisted via pnpm).
 if [[ -d /data/dsh/profiles ]]; then
   rm -rf /data/dsh/profiles/node_modules
   find /data/dsh/profiles -mindepth 2 -maxdepth 2 -type d \
     -name .dsh-module-fallback -exec rm -rf {} + 2>/dev/null || true
 fi
 
+# Seed / merge the persisted global dependency tree. The image mounts a volume
+# over $DSH_NM (docker-compose: ./data/dsh/node-modules) so plugin-market
+# packages survive image upgrades; the volume is empty on first boot and holds
+# the previous image's tree on an upgrade. /opt/dsh-pristine/node_modules is a
+# snapshot of THIS image's own tree: when the image's dsh version changes, copy
+# it over so the new image's official packages win while extra packages (user
+# plugins) stay. A version stamp avoids re-copying on every restart. dsh's own
+# lib/ and package.json live outside node_modules, so the dsh core is still
+# updated by the image itself (dsh本体不持久).
 DSH_NM=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules
 PRISTINE=/opt/dsh-pristine/node_modules
-DSH_VER="$(node -p "require('/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
 DSH_STAMP="$DSH_NM/.dsh-merged-version"
 if [[ -d "$PRISTINE" ]]; then
   mkdir -p "$DSH_NM"
@@ -112,10 +185,17 @@ if [[ -d "$PRISTINE" ]]; then
 else
   echo "WARNING: /opt/dsh-pristine/node_modules missing; global node_modules not seeded." >&2
 fi
+
+# Fail loudly instead of shipping an image whose `dsh` shim points at a missing
+# entry point (Cannot find module .../dsh/lib/bin.js).
 test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js || {
   echo "ERROR: /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js is missing" >&2
   exit 1
 }
+
+# ---------------------------------------------------------------------------
+# Process management
+# ---------------------------------------------------------------------------
 
 pids=()
 cleanup() {
@@ -128,6 +208,10 @@ trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
+# ---------------------------------------------------------------------------
+# 1. dsh web server (127.0.0.1:3080)
+# ---------------------------------------------------------------------------
+
 env \
   HOME=/root \
   DSH_HOME=/data/dsh \
@@ -138,40 +222,42 @@ env \
 dsh_pid=$!
 pids+=("$dsh_pid")
 
-# ---- Readiness gate (version-aware) -----------------------------------------
-# dsh >= 0.1.5-rc.1: skip the probe entirely. The old `curl -fsS` probe treated
-# the expected 401 on `/` as a failure and aborted boot after 60s; from
-# 0.1.5-rc.1 we trust dsh to come up on its own and let Caddy proxy (it will
-# 502 until dsh is listening, and clients simply retry).
-# dsh <  0.1.5-rc.1: keep a tolerant probe that accepts 200/401/403.
-if version_ge "$DSH_VER" "0.1.5-rc.1"; then
-  echo "dsh ${DSH_VER} >= 0.1.5-rc.1: skipping readiness probe."
-else
-  ready=false
-  code=""
-  for _ in {1..60}; do
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:3080/ || true)"
-    case "$code" in
-      200|401|403) ready=true; break ;;
-    esac
-    if ! kill -0 "$dsh_pid" 2>/dev/null; then
-      wait "$dsh_pid"
-      exit $?
-    fi
-    sleep 1
-  done
-  if [[ "$ready" != true ]]; then
-    printf 'DeepSeek Harness did not become ready within 60 seconds (last HTTP code: %s).\n' "${code:-none}" >&2
-    exit 1
+# ---------------------------------------------------------------------------
+# 2. Readiness gate
+# ---------------------------------------------------------------------------
+# The probe below is intentionally tolerant: dsh's `/` returns 401 (or 403)
+# once the web server is up because auth is enforced, so `curl -f` would
+# treat a healthy server as a failure. Accept 200/401/403 as "ready".
+ready=false
+code=""
+for _ in {1..60}; do
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:3080/ || true)"
+  case "$code" in
+    200|401|403) ready=true; break ;;
+  esac
+  if ! kill -0 "$dsh_pid" 2>/dev/null; then
+    wait "$dsh_pid"
+    exit $?
   fi
+  sleep 1
+done
+
+if [[ "$ready" != true ]]; then
+  printf 'DeepSeek Harness did not become ready within 60 seconds (last HTTP code: %s).\n' "${code:-none}" >&2
+  exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# 3. Caddy reverse proxy (:8443, HTTPS) -> 127.0.0.1:3080
+# ---------------------------------------------------------------------------
 
 gosu caddy env \
   XDG_DATA_HOME=/data/caddy \
   XDG_CONFIG_HOME=/data/caddy/config \
   CADDY_ACCESS_HOST="$access_host" \
-  DSH_AUTH_USERNAME="$auth_username" \
-  DSH_AUTH_PASSWORD_HASH="$password_hash" \
+  DSH_AUTH_SNIPPET="$DSH_AUTH_SNIPPET" \
+  DSH_AUTH_USERNAME="$DSH_AUTH_USERNAME" \
+  DSH_AUTH_PASSWORD_HASH="$DSH_AUTH_PASSWORD_HASH" \
   caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
 caddy_pid=$!
 pids+=("$caddy_pid")
