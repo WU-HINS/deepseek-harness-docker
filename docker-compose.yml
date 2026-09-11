@@ -21,13 +21,44 @@ services:
     container_name: ${CONTAINER_NAME:-deepseek-harness}
     restart: unless-stopped
     environment:
+      # ---- Required ----
       DSH_AUTH_PASSWORD: ${DSH_AUTH_PASSWORD:?DSH_AUTH_PASSWORD is required (>= 12 chars)}
       DSH_AUTH_USERNAME: ${DSH_AUTH_USERNAME:?DSH_AUTH_USERNAME is required}
+      HTTPS_ACCESS_HOST: ${HTTPS_ACCESS_HOST:?HTTPS_ACCESS_HOST is required (IPv4 or hostname, no scheme/port)}
+
+      # ---- dsh runtime ----
       DSH_HOME: /data/dsh
       DSH_TELEMETRY_DISABLED: "1"
-      HTTPS_ACCESS_HOST: ${HTTPS_ACCESS_HOST:?HTTPS_ACCESS_HOST is required (IPv4 or hostname, no scheme/port)}
+
+      # ---- dsh listen address (optional) ----
+      # Defaults match the entrypoint: loopback only, Caddy is the single
+      # ingress. Uncomment / set in .env to change:
+      #   DSH_HOST=0.0.0.0     -> dsh also reachable directly (bypasses Caddy
+      #                           TLS + auth; publish the port below if you
+      #                           really need it, and make sure the network
+      #                           is trusted)
+      #   DSH_PORT=3090        -> dsh listens elsewhere; Caddy's upstream
+      #                           follows automatically (DSH_UPSTREAM is
+      #                           derived in the entrypoint)
+      #   DSH_TRUSTED_HOST=127.0.0.1:3080,10.0.0.5:3080
+      #                        -> extra authorities dsh should accept
+      # When DSH_HOST is non-loopback the entrypoint switches Caddy to
+      # passthrough mode: Host / X-Real-IP / X-Forwarded-For are forwarded
+      # untouched, and X-Real-IP is only trusted for private peers.
+      DSH_HOST: ${DSH_HOST:-127.0.0.1}
+      DSH_PORT: ${DSH_PORT:-3080}
+      DSH_TRUSTED_HOST: ${DSH_TRUSTED_HOST:-}
+      # DSH_UPSTREAM is normally derived from DSH_HOST/DSH_PORT by the
+      # entrypoint. Set it only if Caddy should proxy somewhere else.
+      # DSH_UPSTREAM: ${DSH_UPSTREAM:-}
+
     ports:
+      # Caddy HTTPS entry point (the only public port by default).
       - "${HTTPS_PORT:-8443}:8443"
+      # Direct dsh access. Leave commented unless DSH_HOST is non-loopback
+      # and you explicitly want clients to bypass Caddy.
+      # - "${DSH_PORT:-3080}:${DSH_PORT:-3080}"
+
     volumes:
       - ./data/dsh:/data/dsh
       # Persist the global dsh dependency/plugin tree across upgrades.
@@ -39,16 +70,30 @@ services:
       - ./data/caddy:/data/caddy
       - ./workspace:/workspace
       - /etc/localtime:/etc/localtime:ro
+
     tmpfs:
       - /tmp:mode=1777,size=256m
+
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://127.0.0.1:3080/"]
+      # Probe the Caddy entry point (HTTPS 8443), not dsh directly: it is
+      # what clients actually use, and it exercises the whole chain.
+      # -k            : Caddy uses its local CA, not trusted by the container.
+      # no -f         : a 401/403 is a *healthy* response (auth is enforced).
+      # exit 0 only on a real HTTP reply; connection failures still fail.
+      test:
+        - CMD-SHELL
+        - >
+          curl -k -s -o /dev/null --max-time 5 https://127.0.0.1:3080/ || exit 1
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
-      start_period: 30s
+      # The entrypoint waits up to 60s for dsh and then starts Caddy; allow
+      # plenty of headroom for the first cold boot (dependency merge, etc.).
+      start_period: 180s
+
     security_opt:
       - no-new-privileges:true
+
     deploy:
       resources:
         limits:
