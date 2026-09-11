@@ -49,6 +49,28 @@ self-signed certificate (or install the local CA at
 | `HTTPS_PORT`         |    no    | Host port mapped to container `:8443`. Default `8443`.                      |
 | `CONTAINER_NAME`     |    no    | Container name. Default `deepseek-harness`.                                 |
 | `CPUS` / `MEMORY_LIMIT` |  no   | Optional resource limits (used by `deploy.resources.limits`).               |
+| `DSH_PRESERVE_HOST`    |   no    | Preserve the incoming Host header (Caddy passthrough). Default `true` (recommended); set `false` to use Caddy's proxy_local mode. |
+
+---
+
+## Caddy Host passthrough (recommended)
+
+By default Caddy runs in **passthrough mode** and preserves the incoming **Host**
+header instead of rewriting it to the loopback upstream. dsh therefore sees the
+real host / domain / SNI you used to reach the UI, which keeps generated links
+and resources consistent — especially when you access the container through a
+reverse proxy, your own domain, or a LAN gateway.
+
+- `DSH_PRESERVE_HOST=true` (default) → `proxy_passthrough`: only the Host header
+  is preserved; everything else keeps Caddy's default forwarding behaviour.
+- `DSH_PRESERVE_HOST=false` → `proxy_local` (Caddy's default): Host is rewritten
+  to the upstream address.
+- Caddy only trusts forwarding headers (`X-Forwarded-For`, `X-Real-IP`) from
+  private peers (`trusted_proxies static private_ranges`), so client IP
+  resolution stays correct even behind another proxy hop.
+
+Set `DSH_PRESERVE_HOST=false` in `.env` only if you have a reason to hide the
+original Host from the upstream.
 
 ---
 
