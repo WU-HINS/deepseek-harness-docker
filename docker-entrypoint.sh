@@ -15,9 +15,6 @@ is_access_host() {
   ' "$1"
 }
 
-# version_ge A B : exit 0 if A >= B (semver, incl. -rc.N prerelease).
-# GNU `sort -V` mishandles prerelease ordering (0.1.5-rc.1 vs 0.1.5),
-# so parse it ourselves.
 version_ge() {
   node -e '
     const parse = (v) => {
@@ -26,7 +23,7 @@ version_ge() {
     };
     const cmpPre = (a, b) => {
       if (a === b) return 0;
-      if (a === "") return 1;          // release > prerelease
+      if (a === "") return 1;
       if (b === "") return -1;
       const as = a.split("."), bs = b.split(".");
       for (let i = 0; i < Math.max(as.length, bs.length); i++) {
@@ -103,35 +100,33 @@ if (( ${#auth_password} < 12 )); then
 fi
 
 # ---------------------------------------------------------------------------
-# Resolve dsh version early (drives Caddy auth mode)
+# Resolve dsh version (drives Caddy auth mode) and compute what Caddy needs
 # ---------------------------------------------------------------------------
 
 DSH_VER="$(node -p "require('/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
 
-# dsh >= 0.1.5-rc.1 ships its own token auth; adding Caddy basic auth on top
-# only gets in the way.
 AUTH_SELF_MANAGED_MIN="0.1.5-rc.1"
 
 if version_ge "$DSH_VER" "$AUTH_SELF_MANAGED_MIN"; then
   echo "dsh ${DSH_VER} >= ${AUTH_SELF_MANAGED_MIN}: dsh handles auth; disabling Caddy basic auth."
   DSH_AUTH_SNIPPET=auth_disabled
-  caddy_auth_username=""
-  caddy_auth_password_hash=""
+  DSH_AUTH_USERNAME=""
+  DSH_AUTH_PASSWORD_HASH=""
 else
   echo "dsh ${DSH_VER} < ${AUTH_SELF_MANAGED_MIN}: enabling Caddy basic auth."
   DSH_AUTH_SNIPPET=auth_protected
-  caddy_auth_username="$auth_username"
-  caddy_auth_password_hash="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
+  DSH_AUTH_USERNAME="$auth_username"
+  DSH_AUTH_PASSWORD_HASH="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
 fi
 
-# Caddy treats an undefined {$VAR} as a config-load error, so both auth vars
-# must be passed as (possibly empty) strings even when auth is disabled.
-export DSH_AUTH_SNIPPET
-export DSH_AUTH_USERNAME="$caddy_auth_username"
-export DSH_AUTH_PASSWORD_HASH="$caddy_auth_password_hash"
+# Drop the plaintext secrets. Keep the Caddy-facing vars (possibly empty) so
+# {$DSH_AUTH_USERNAME} / {$DSH_AUTH_PASSWORD_HASH} always resolve — Caddy
+# treats an undefined {$VAR} as a config-load error.
+unset HTTPS_ACCESS_HOST DSH_AUTH_PASSWORD auth_password
 
-unset HTTPS_ACCESS_HOST DSH_AUTH_USERNAME DSH_AUTH_PASSWORD auth_password
-unset caddy_auth_username caddy_auth_password_hash
+export DSH_AUTH_SNIPPET
+export DSH_AUTH_USERNAME
+export DSH_AUTH_PASSWORD_HASH
 
 # ---------------------------------------------------------------------------
 # Directories
@@ -145,31 +140,12 @@ install -d -m 0700 -o caddy -g caddy /data/caddy /data/caddy/config
 # Dependency tree: wipe generated state, then seed/merge the persistent volume
 # ---------------------------------------------------------------------------
 
-# The dependency directory is NOT designed to be persisted: the shared
-# $DSH_HOME/profiles/node_modules mirror and each profile's .dsh-module-fallback
-# exist only to mirror the *current* global dsh installation, and dsh regenerates
-# both on every boot (healProfilesModuleFallback). When the image's dsh version
-# changes, a stale fallback state from an older install can carry a plugin tree
-# that no longer matches the new installation (e.g. plugin-market plugins whose
-# peer packages are missing) and break startup with ERR_MODULE_NOT_FOUND.
-# Wipe that generated state here so dsh rebuilds it from the installed version
-# at boot. The per-profile node_modules is left untouched because it may hold
-# packages installed with `dsh plugin add` (persisted via pnpm).
 if [[ -d /data/dsh/profiles ]]; then
   rm -rf /data/dsh/profiles/node_modules
   find /data/dsh/profiles -mindepth 2 -maxdepth 2 -type d \
     -name .dsh-module-fallback -exec rm -rf {} + 2>/dev/null || true
 fi
 
-# Seed / merge the persisted global dependency tree. The image mounts a volume
-# over $DSH_NM (docker-compose: ./data/dsh/node-modules) so plugin-market
-# packages survive image upgrades; the volume is empty on first boot and holds
-# the previous image's tree on an upgrade. /opt/dsh-pristine/node_modules is a
-# snapshot of THIS image's own tree: when the image's dsh version changes, copy
-# it over so the new image's official packages win while extra packages (user
-# plugins) stay. A version stamp avoids re-copying on every restart. dsh's own
-# lib/ and package.json live outside node_modules, so the dsh core is still
-# updated by the image itself (dsh本体不持久).
 DSH_NM=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules
 PRISTINE=/opt/dsh-pristine/node_modules
 DSH_STAMP="$DSH_NM/.dsh-merged-version"
@@ -186,8 +162,6 @@ else
   echo "WARNING: /opt/dsh-pristine/node_modules missing; global node_modules not seeded." >&2
 fi
 
-# Fail loudly instead of shipping an image whose `dsh` shim points at a missing
-# entry point (Cannot find module .../dsh/lib/bin.js).
 test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js || {
   echo "ERROR: /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js is missing" >&2
   exit 1
@@ -223,11 +197,10 @@ dsh_pid=$!
 pids+=("$dsh_pid")
 
 # ---------------------------------------------------------------------------
-# 2. Readiness gate
+# 2. Readiness gate (always runs)
 # ---------------------------------------------------------------------------
-# The probe below is intentionally tolerant: dsh's `/` returns 401 (or 403)
-# once the web server is up because auth is enforced, so `curl -f` would
-# treat a healthy server as a failure. Accept 200/401/403 as "ready".
+# dsh's `/` returns 401/403 once the web server is up (auth enforced), so
+# `curl -f` would treat a healthy server as a failure. Accept 200/401/403.
 ready=false
 code=""
 for _ in {1..60}; do
