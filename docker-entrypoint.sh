@@ -121,7 +121,8 @@ pids+=("$dsh_pid")
 
 ready=false
 for _ in {1..60}; do
-  if curl -fsS --max-time 2 http://127.0.0.1:3080/ >/dev/null 2>&1; then
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:3080/ || true)"
+  if [[ "$code" == "200" || "$code" == "401" || "$code" == "403" ]]; then
     ready=true
     break
   fi
