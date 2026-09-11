@@ -278,7 +278,7 @@ env \
   DSH_HOME=/data/dsh \
   DSH_TELEMETRY_DISABLED=1 \
   node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
-    web --no-open --host "$dsh_host" --port "$dsh_port" \
+    web --host "$dsh_host" --port "$dsh_port" \
       --trusted-host "$dsh_trusted_host" "$access_host" &
 dsh_pid=$!
 pids+=("$dsh_pid")
