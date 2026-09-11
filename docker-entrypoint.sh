@@ -55,6 +55,13 @@ is_loopback_host() {
   esac
 }
 
+is_wildcard_host() {
+  case "${1,,}" in
+    0.0.0.0|::|\[::\]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------
@@ -76,6 +83,10 @@ if [[ "${1:-}" == "--self-test" ]]; then
   is_loopback_host ::1
   ! is_loopback_host 0.0.0.0
   ! is_loopback_host 192.168.1.10
+  is_wildcard_host 0.0.0.0
+  is_wildcard_host ::
+  ! is_wildcard_host 127.0.0.1
+  ! is_wildcard_host 192.168.1.10
   echo "self-test: OK"
   exit 0
 fi
@@ -112,12 +123,15 @@ if (( ${#auth_password} < 12 )); then
 fi
 
 # ---------------------------------------------------------------------------
-# dsh listen address (default local; override via DSH_HOST / DSH_PORT)
+# dsh listen address (default loopback; override via DSH_HOST / DSH_PORT)
 # ---------------------------------------------------------------------------
-# Default 127.0.0.1:3080 keeps dsh reachable only inside the container; Caddy
-# is the single ingress. Set DSH_HOST to a non-loopback address (e.g. 0.0.0.0)
-# when other paths must reach dsh directly; Caddy then switches to passthrough
-# mode and stops rewriting Host / X-Real-IP / X-Forwarded-For.
+# Caddy ALWAYS proxies to 127.0.0.1:${DSH_PORT}; only dsh's own bind address
+# is configurable. That means DSH_HOST must keep dsh reachable on loopback:
+#   127.0.0.1 (default) - fine
+#   0.0.0.0 / ::        - fine (wildcard includes loopback)
+#   a specific NIC IP   - NOT fine, dsh binds only that NIC and Caddy's
+#                         127.0.0.1 connection will be refused. A warning is
+#                         printed but startup is not blocked.
 
 dsh_host="${DSH_HOST:-127.0.0.1}"
 dsh_port="${DSH_PORT:-3080}"
@@ -131,33 +145,42 @@ if [[ ! "$dsh_port" =~ ^[0-9]+$ ]] || (( dsh_port < 1 || dsh_port > 65535 )); th
   exit 1
 fi
 
-dsh_addr="${dsh_host}:${dsh_port}"
-
-dsh_trusted_host="${DSH_TRUSTED_HOST:-$dsh_addr}"
-
-DSH_UPSTREAM="$dsh_addr"
+# Caddy's upstream target is fixed to loopback.
+DSH_UPSTREAM="${DSH_UPSTREAM:-127.0.0.1:${dsh_port}}"
 export DSH_UPSTREAM
 
-# ---------------------------------------------------------------------------
-# Choose Caddy proxy mode based on the listen address
-# ---------------------------------------------------------------------------
-# loopback  -> proxy_local: Caddy is the only ingress, it owns the forwarding
-#              headers (standard reverse_proxy behaviour).
-# otherwise -> proxy_passthrough: dsh is reachable via other paths too, so
-#              Caddy must not rewrite Host / X-Real-IP / X-Forwarded-For.
-#              X-Real-IP is still trusted (and resolved by Caddy) only when
-#              the direct peer is on a private network (see Caddyfile
-#              trusted_proxies / client_ip_headers).
+# --trusted-host: authorities dsh should accept as valid.
+# Default list covers both paths a request can take:
+#   127.0.0.1:PORT  - Caddy in proxy_local mode rewrites the Host header
+#   $access_host    - direct/browser access and passthrough mode keep the
+#                     original Host
+# Override with DSH_TRUSTED_HOST (comma-separated) if you need more.
+dsh_trusted_host="${DSH_TRUSTED_HOST:-127.0.0.1:${dsh_port}}"
 
-if is_loopback_host "$dsh_host"; then
-  DSH_PROXY_SNIPPET=proxy_local
+if ! is_loopback_host "$dsh_host" && ! is_wildcard_host "$dsh_host"; then
+  printf 'WARNING: DSH_HOST=%s is neither loopback nor a wildcard address; dsh will not be reachable via 127.0.0.1 and Caddy (%s) will fail to connect.\n' \
+    "$dsh_host" "$DSH_UPSTREAM" >&2
+fi
+
+echo "dsh listen ${dsh_host}:${dsh_port} -> Caddy upstream ${DSH_UPSTREAM} (trusted-host: ${dsh_trusted_host}, ${access_host})"
+
+# ---------------------------------------------------------------------------
+# Caddy proxy mode
+# ---------------------------------------------------------------------------
+# Caddy always targets loopback, so there is no "chained proxy in front"
+# scenario to accommodate: proxy_local is the right default in every
+# supported case. Passthrough mode remains selectable via DSH_PROXY_SNIPPET
+# for advanced setups (e.g. you really do run another proxy inside the
+# container and want the original headers preserved).
+
+if is_loopback_host "$dsh_host" || is_wildcard_host "$dsh_host"; then
+  : "${DSH_PROXY_SNIPPET:=proxy_local}"
 else
-  DSH_PROXY_SNIPPET=proxy_passthrough
-  echo "dsh listen address ${dsh_addr} is not loopback: Caddy will pass through Host/X-Real-IP/X-Forwarded-For (X-Real-IP trusted for private peers only)."
+  # Bind is NIC-specific: loopback connection may fail. Keep the default
+  # proxy behaviour, but say so loudly.
+  : "${DSH_PROXY_SNIPPET:=proxy_local}"
 fi
 export DSH_PROXY_SNIPPET
-
-echo "dsh will listen on ${dsh_addr} (trusted-host: ${dsh_trusted_host}, ${access_host})"
 
 # ---------------------------------------------------------------------------
 # Resolve dsh version (drives Caddy auth mode)
@@ -259,15 +282,11 @@ pids+=("$dsh_pid")
 # ---------------------------------------------------------------------------
 # 2. Readiness gate (always runs)
 # ---------------------------------------------------------------------------
-# dsh's `/` returns 401/403 once the web server is up (auth enforced), so
-# `curl -f` would treat a healthy server as a failure. Accept 200/401/403.
-# When DSH_HOST is 0.0.0.0 or ::, curl the loopback form instead.
-probe_host="$dsh_host"
-case "$probe_host" in
-  0.0.0.0) probe_host=127.0.0.1 ;;
-  ::|\[::\]) probe_host='[::1]' ;;
-esac
-probe_url="http://${probe_host}:${dsh_port}/"
+# Probe 127.0.0.1:${dsh_port} — the same address Caddy will use. dsh's `/`
+# returns 401/403 once the web server is up, so accept 200/401/403 instead of
+# using `curl -f`.
+
+probe_url="http://127.0.0.1:${dsh_port}/"
 
 ready=false
 code=""
