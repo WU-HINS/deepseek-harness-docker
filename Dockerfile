@@ -92,7 +92,8 @@ RUN set -eux; \
         libbz2-dev \
         libreadline-dev \
         libsqlite3-dev \
-        zlib1g-dev; \
+        zlib1g-dev \
+        libnss3-tools; \
     rm -rf /var/lib/apt/lists/*
 # ---- pip: use Tsinghua (TUNA) PyPI mirror ----
 RUN set -eux; \
