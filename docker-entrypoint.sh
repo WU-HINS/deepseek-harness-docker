@@ -48,6 +48,13 @@ version_ge() {
   ' "$1" "$2"
 }
 
+is_loopback_host() {
+  case "${1,,}" in
+    127.*|localhost|::1|\[::1\]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------
@@ -64,6 +71,11 @@ if [[ "${1:-}" == "--self-test" ]]; then
   version_ge 0.2.0      0.1.5-rc.1
   ! version_ge 0.1.4      0.1.5-rc.1
   ! version_ge 0.1.2-rc.1 0.1.5-rc.1
+  is_loopback_host 127.0.0.1
+  is_loopback_host localhost
+  is_loopback_host ::1
+  ! is_loopback_host 0.0.0.0
+  ! is_loopback_host 192.168.1.10
   echo "self-test: OK"
   exit 0
 fi
@@ -100,7 +112,55 @@ if (( ${#auth_password} < 12 )); then
 fi
 
 # ---------------------------------------------------------------------------
-# Resolve dsh version (drives Caddy auth mode) and compute what Caddy needs
+# dsh listen address (default local; override via DSH_HOST / DSH_PORT)
+# ---------------------------------------------------------------------------
+# Default 127.0.0.1:3080 keeps dsh reachable only inside the container; Caddy
+# is the single ingress. Set DSH_HOST to a non-loopback address (e.g. 0.0.0.0)
+# when other paths must reach dsh directly; Caddy then switches to passthrough
+# mode and stops rewriting Host / X-Real-IP / X-Forwarded-For.
+
+dsh_host="${DSH_HOST:-127.0.0.1}"
+dsh_port="${DSH_PORT:-3080}"
+
+if [[ ! "$dsh_host" =~ ^[0-9A-Za-z._:\[\]-]+$ ]]; then
+  printf 'DSH_HOST must be an IP address or hostname (got: %s).\n' "$dsh_host" >&2
+  exit 1
+fi
+if [[ ! "$dsh_port" =~ ^[0-9]+$ ]] || (( dsh_port < 1 || dsh_port > 65535 )); then
+  printf 'DSH_PORT must be an integer between 1 and 65535 (got: %s).\n' "$dsh_port" >&2
+  exit 1
+fi
+
+dsh_addr="${dsh_host}:${dsh_port}"
+
+dsh_trusted_host="${DSH_TRUSTED_HOST:-$dsh_addr}"
+
+DSH_UPSTREAM="$dsh_addr"
+export DSH_UPSTREAM
+
+# ---------------------------------------------------------------------------
+# Choose Caddy proxy mode based on the listen address
+# ---------------------------------------------------------------------------
+# loopback  -> proxy_local: Caddy is the only ingress, it owns the forwarding
+#              headers (standard reverse_proxy behaviour).
+# otherwise -> proxy_passthrough: dsh is reachable via other paths too, so
+#              Caddy must not rewrite Host / X-Real-IP / X-Forwarded-For.
+#              X-Real-IP is still trusted (and resolved by Caddy) only when
+#              the direct peer is on a private network (see Caddyfile
+#              trusted_proxies / client_ip_headers).
+
+if is_loopback_host "$dsh_host"; then
+  DSH_PROXY_SNIPPET=proxy_local
+else
+  DSH_PROXY_SNIPPET=proxy_passthrough
+  echo "dsh listen address ${dsh_addr} is not loopback: Caddy will pass through Host/X-Real-IP/X-Forwarded-For (X-Real-IP trusted for private peers only)."
+fi
+export DSH_PROXY_SNIPPET
+
+echo "dsh will listen on ${dsh_addr} (trusted-host: ${dsh_trusted_host}, ${access_host})"
+
+# ---------------------------------------------------------------------------
+# Resolve dsh version (drives Caddy auth mode)
 # ---------------------------------------------------------------------------
 
 DSH_VER="$(node -p "require('/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || echo unknown)"
@@ -119,7 +179,7 @@ else
   DSH_AUTH_PASSWORD_HASH="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
 fi
 
-# Drop the plaintext secrets. Keep the Caddy-facing vars (possibly empty) so
+# Drop plaintext secrets only. Keep the Caddy-facing vars (possibly empty) so
 # {$DSH_AUTH_USERNAME} / {$DSH_AUTH_PASSWORD_HASH} always resolve — Caddy
 # treats an undefined {$VAR} as a config-load error.
 unset HTTPS_ACCESS_HOST DSH_AUTH_PASSWORD auth_password
@@ -183,7 +243,7 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 
 # ---------------------------------------------------------------------------
-# 1. dsh web server (127.0.0.1:3080)
+# 1. dsh web server
 # ---------------------------------------------------------------------------
 
 env \
@@ -191,8 +251,8 @@ env \
   DSH_HOME=/data/dsh \
   DSH_TELEMETRY_DISABLED=1 \
   node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
-    web --no-open --host 127.0.0.1 --port 3080 \
-      --trusted-host 127.0.0.1:3080 "$access_host" &
+    web --no-open --host "$dsh_host" --port "$dsh_port" \
+      --trusted-host "$dsh_trusted_host" "$access_host" &
 dsh_pid=$!
 pids+=("$dsh_pid")
 
@@ -201,10 +261,18 @@ pids+=("$dsh_pid")
 # ---------------------------------------------------------------------------
 # dsh's `/` returns 401/403 once the web server is up (auth enforced), so
 # `curl -f` would treat a healthy server as a failure. Accept 200/401/403.
+# When DSH_HOST is 0.0.0.0 or ::, curl the loopback form instead.
+probe_host="$dsh_host"
+case "$probe_host" in
+  0.0.0.0) probe_host=127.0.0.1 ;;
+  ::|\[::\]) probe_host='[::1]' ;;
+esac
+probe_url="http://${probe_host}:${dsh_port}/"
+
 ready=false
 code=""
 for _ in {1..60}; do
-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:3080/ || true)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$probe_url" || true)"
   case "$code" in
     200|401|403) ready=true; break ;;
   esac
@@ -216,18 +284,21 @@ for _ in {1..60}; do
 done
 
 if [[ "$ready" != true ]]; then
-  printf 'DeepSeek Harness did not become ready within 60 seconds (last HTTP code: %s).\n' "${code:-none}" >&2
+  printf 'DeepSeek Harness did not become ready within 60 seconds on %s (last HTTP code: %s).\n' \
+    "$probe_url" "${code:-none}" >&2
   exit 1
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Caddy reverse proxy (:8443, HTTPS) -> 127.0.0.1:3080
+# 3. Caddy reverse proxy (:8443, HTTPS) -> $DSH_UPSTREAM
 # ---------------------------------------------------------------------------
 
 gosu caddy env \
   XDG_DATA_HOME=/data/caddy \
   XDG_CONFIG_HOME=/data/caddy/config \
   CADDY_ACCESS_HOST="$access_host" \
+  DSH_UPSTREAM="$DSH_UPSTREAM" \
+  DSH_PROXY_SNIPPET="$DSH_PROXY_SNIPPET" \
   DSH_AUTH_SNIPPET="$DSH_AUTH_SNIPPET" \
   DSH_AUTH_USERNAME="$DSH_AUTH_USERNAME" \
   DSH_AUTH_PASSWORD_HASH="$DSH_AUTH_PASSWORD_HASH" \
