@@ -7,6 +7,7 @@
 #
 # Env placeholders are substituted by Caddy at config load:
 #   CADDY_ACCESS_HOST      - the HTTPS_ACCESS_HOST value (validated by entrypoint)
+#   DSH_AUTH_SNIPPET       - which auth mode to import: auth_protected / auth_disabled
 #   DSH_AUTH_USERNAME      - basic auth username
 #   DSH_AUTH_PASSWORD_HASH - argon2id hash from 'caddy hash-password'
 {
@@ -14,10 +15,21 @@
 	local_certs
 }
 
-https://{$CADDY_ACCESS_HOST}:8443 {
+# Basic auth on. Used when dsh does NOT ship its own auth
+# (dsh < 0.1.5-rc.1).
+(auth_protected) {
 	basic_auth {
 		{$DSH_AUTH_USERNAME} {$DSH_AUTH_PASSWORD_HASH}
 	}
+}
+
+# Basic auth off. dsh >= 0.1.5-rc.1 authenticates itself via token; adding
+# a second Basic Auth layer here only gets in the way.
+(auth_disabled) {
+}
+
+https://{$CADDY_ACCESS_HOST}:8443 {
+	import {$DSH_AUTH_SNIPPET:auth_protected}
 
 	reverse_proxy 127.0.0.1:3080
 }
