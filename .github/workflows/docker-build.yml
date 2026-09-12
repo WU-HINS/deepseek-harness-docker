@@ -60,19 +60,32 @@ jobs:
             echo "dsh_version=${{ inputs.dsh_version }}" >> "$GITHUB_OUTPUT"
             echo "Using pinned DSH version: ${{ inputs.dsh_version }}"
           else
-            VER="$(npm view @deepseek-ai/dsh version)"
-            # The pre-release `alpha` channel (0.1.5-alpha.2) bundles the
-            # not-yet-published plugin dsh-trusted-host-proxy-403-fix and fails
-            # to boot lethally. Never auto-promote it as `latest`; if upstream
-            # ever retags a pre-release as latest, refuse it here so the build
-            # stays on the last stable release instead of shipping a broken image.
-            case "$VER" in
-              *-alpha.*|*-beta.*)
-                PRE="$VER"
-                VER="$(npm view @deepseek-ai/dsh versions --json 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const v=JSON.parse(d);process.stdout.write(v.filter(x=>!/-alpha\.|-beta\./.test(x)).pop()||"")})')"
-                echo "WARNING: latest tag points at pre-release channel ${PRE}; falling back to stable ${VER}" >&2
-                ;;
-            esac
+            # Enumerate every published version and pick the highest by semantic
+            # versioning (not the `latest` dist-tag, and not array order, which
+            # is just publish order). Exclude the pre-release `alpha`/`beta`
+            # channels (e.g. 0.1.5-alpha.2) that bundle a plugin tree failing to
+            # boot lethally; `rc` and any stable release are ranked normally, so
+            # a newer `rc` published under the `next` tag is still picked.
+            VER="$(npm view @deepseek-ai/dsh versions --json 2>/dev/null | node -e '
+              let d="";
+              process.stdin.on("data",c=>d+=c).on("end",()=>{
+                const list=JSON.parse(d);
+                const cmp=(a,b)=>{
+                  const pa=a.split(/[-+]/), pb=b.split(/[-+]/);
+                  const na=pa[0].split(".").map(Number), nb=pb[0].split(".").map(Number);
+                  for(let i=0;i<3;i++){ if((na[i]||0)!==(nb[i]||0)) return (na[i]||0)-(nb[i]||0); }
+                  const preA=pa[1]||"", preB=pb[1]||"";
+                  if(preA===preB) return 0;
+                  if(preA==="") return 1;
+                  if(preB==="") return -1;
+                  return preA.localeCompare(preB, undefined, {numeric:true});
+                };
+                const pick=list.filter(x=>!/-alpha\.|-beta\./.test(x)).sort(cmp);
+                const top=pick[pick.length-1]||"";
+                if(!top){ process.stderr.write("WARNING: no usable dsh version found\n"); }
+                process.stdout.write(top);
+              })
+            ')"
             echo "dsh_version=${VER}" >> "$GITHUB_OUTPUT"
             echo "Auto-resolved DSH version: ${VER}"
           fi
