@@ -93,6 +93,7 @@ RUN set -eux; \
         libreadline-dev \
         libsqlite3-dev \
         zlib1g-dev \
+        openssh-client \
         libnss3-tools; \
     rm -rf /var/lib/apt/lists/*
 # ---- pip: use Tsinghua (TUNA) PyPI mirror ----
