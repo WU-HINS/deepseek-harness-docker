@@ -185,10 +185,11 @@ echo "dsh listen ${dsh_host}:${dsh_port} -> Caddy upstream ${DSH_UPSTREAM} (trus
 # ---------------------------------------------------------------------------
 # Caddy proxy mode
 # ---------------------------------------------------------------------------
-# proxy_local (default):
-#   Caddy is the only ingress and owns the forwarding headers. The Host header
-#   is rewritten to the upstream address; X-Forwarded-For gets Caddy's peer
-#   appended; X-Real-IP is not set.
+# proxy_local (DSH_PRESERVE_HOST=false):
+#   Caddy rewrites the incoming Host AND Origin to the loopback upstream, so
+#   dsh sees the request as local and same-origin (keeps Origin-based checks
+#   and API/CORS calls working). X-Forwarded-For gets Caddy's peer appended;
+#   X-Real-IP is not set.
 #
 # proxy_passthrough (DSH_PRESERVE_HOST=true):
 #   Preserve the incoming Host header only. Everything else keeps Caddy's
@@ -201,6 +202,7 @@ if is_truthy "${DSH_PRESERVE_HOST:-}"; then
   echo "DSH_PRESERVE_HOST enabled: Caddy will preserve the incoming Host header."
 else
   : "${DSH_PROXY_SNIPPET:=proxy_local}"
+  echo "DSH_PRESERVE_HOST disabled: Caddy will rewrite Host and Origin to the loopback upstream."
 fi
 export DSH_PROXY_SNIPPET
 

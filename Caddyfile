@@ -43,14 +43,22 @@
 (auth_disabled) {
 }
 
-# Default proxy mode: Caddy is the only ingress, so it may set the forwarding
-# headers itself. This is Caddy's stock reverse_proxy behaviour:
+# Rewrite proxy mode (DSH_PRESERVE_HOST=false): Caddy rewrites the incoming
+# Host AND Origin to the loopback upstream, so dsh sees the request as local
+# and same-origin. Use this when the container is reached directly via
+# 127.0.0.1 (e.g. the browser is on the Docker host). Rewriting Origin too
+# keeps Origin-based same-origin / CORS checks consistent so API calls work.
+# Forwarding headers:
 #   Host              -> rewritten to the upstream address
+#   Origin            -> rewritten to http://<upstream>  (same-origin)
 #   X-Forwarded-For   -> Caddy's peer appended
 #   X-Forwarded-Proto -> https
 #   X-Real-IP         -> not set
 (proxy_local) {
-	reverse_proxy {$DSH_UPSTREAM:127.0.0.1:3080}
+	reverse_proxy {$DSH_UPSTREAM:127.0.0.1:3080} {
+		header_up Host {$DSH_UPSTREAM:127.0.0.1:3080}
+		header_up Origin http://{$DSH_UPSTREAM:127.0.0.1:3080}
+	}
 }
 
 # Passthrough proxy mode: preserve the incoming Host only. All other headers

@@ -1,5 +1,7 @@
 # DeepSeek Harness (Docker)
 
+> **📖 中文版文档：[README_ZH.md](./README_ZH.md)** · Read this doc in Chinese.
+
 Run the **DeepSeek Harness** web UI in a container with a TLS reverse proxy and
 basic-auth front door. The image is built from `debian:bookworm-slim` with:
 
@@ -34,6 +36,12 @@ Then open `https://<HTTPS_ACCESS_HOST>:<HTTPS_PORT>` in a browser and accept the
 self-signed certificate (or install the local CA at
 `./data/caddy/pki/authorities/local/root.crt`).
 
+> **Recommended auth setup:** Caddy runs in rewrite mode by default
+> (`DSH_PRESERVE_HOST=false`) and does not add its own basic-auth layer. Install
+> the **`dsh-webui-auth` plugin** so dsh authenticates inside the app instead —
+> see [Caddy proxy mode](#caddy-proxy-mode-recommended-rewrite--dsh-webui-auth)
+> below.
+
 > The container always listens on `:8443`. `HTTPS_PORT` only controls the
 > **host-side** port mapping.
 
@@ -49,28 +57,31 @@ self-signed certificate (or install the local CA at
 | `HTTPS_PORT`         |    no    | Host port mapped to container `:8443`. Default `8443`.                      |
 | `CONTAINER_NAME`     |    no    | Container name. Default `deepseek-harness`.                                 |
 | `CPUS` / `MEMORY_LIMIT` |  no   | Optional resource limits (used by `deploy.resources.limits`).               |
-| `DSH_PRESERVE_HOST`    |   no    | Preserve the incoming Host header (Caddy passthrough). Default `true` (recommended); set `false` to use Caddy's proxy_local mode. |
+| `DSH_PRESERVE_HOST`    |   no    | Proxy mode. Default `false` (recommended): Caddy rewrites Host+Origin to the loopback upstream; pair with the `dsh-webui-auth` plugin. Set `true` to preserve the original Host (passthrough). |
 
 ---
 
-## Caddy Host passthrough (recommended)
+## Caddy proxy mode (recommended: rewrite + dsh-webui-auth)
 
-By default Caddy runs in **passthrough mode** and preserves the incoming **Host**
-header instead of rewriting it to the loopback upstream. dsh therefore sees the
-real host / domain / SNI you used to reach the UI, which keeps generated links
-and resources consistent — especially when you access the container through a
-reverse proxy, your own domain, or a LAN gateway.
+By default Caddy runs in **rewrite mode** (`DSH_PRESERVE_HOST=false`): both the
+**Host** and **Origin** headers are rewritten to the loopback upstream
+(`127.0.0.1:3080`). dsh therefore sees every request as local / same-origin,
+which keeps origin-based same-origin and CORS checks consistent so API calls
+work regardless of the client hostname.
 
-- `DSH_PRESERVE_HOST=true` (default) → `proxy_passthrough`: only the Host header
-  is preserved; everything else keeps Caddy's default forwarding behaviour.
-- `DSH_PRESERVE_HOST=false` → `proxy_local` (Caddy's default): Host is rewritten
-  to the upstream address.
+Pair this with the **`dsh-webui-auth` plugin**, which authenticates inside dsh
+itself — so you don't need Caddy's basic-auth front door (`auth_disabled`).
+
+- `DSH_PRESERVE_HOST=false` (default) → `proxy_local`: Host and Origin are
+  rewritten to the loopback upstream.
+- `DSH_PRESERVE_HOST=true` → `proxy_passthrough`: only the Host header is
+  preserved; everything else keeps Caddy's default forwarding behaviour. Use
+  this if you want the real host/domain/SNI kept visible to dsh (e.g. to reach
+  the UI through a reverse proxy, your own domain, or a LAN gateway so
+  generated links/resources keep that host).
 - Caddy only trusts forwarding headers (`X-Forwarded-For`, `X-Real-IP`) from
   private peers (`trusted_proxies static private_ranges`), so client IP
   resolution stays correct even behind another proxy hop.
-
-Set `DSH_PRESERVE_HOST=false` in `.env` only if you have a reason to hide the
-original Host from the upstream.
 
 ---
 
