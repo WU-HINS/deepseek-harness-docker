@@ -29,7 +29,10 @@ At runtime two processes are managed by `docker-entrypoint.sh`:
 ```bash
 cp .env.example .env
 # edit .env: HTTPS_ACCESS_HOST, DSH_AUTH_USERNAME, DSH_AUTH_PASSWORD
-docker compose up -d --build
+# Pull the latest published image (default):
+docker compose up -d
+# Or build from source instead:
+# docker compose up -d --build
 ```
 
 Then open `https://<HTTPS_ACCESS_HOST>:<HTTPS_PORT>` in a browser and accept the
@@ -86,6 +89,10 @@ itself — so you don't need Caddy's basic-auth front door (`auth_disabled`).
 ---
 
 ## Build locally (single platform)
+
+> The `docker-compose.yml` pulls the published GHCR image by default. Build from
+> source here, then point compose at your local image (see the `build:` block in
+> docker-compose.yml) or run the containers manually.
 
 ```bash
 # latest published dsh version (default)

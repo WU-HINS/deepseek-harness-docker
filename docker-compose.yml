@@ -1,11 +1,12 @@
 # DeepSeek Harness - docker compose
 #
-# Builds and runs the DeepSeek Harness container using relative mounts
-# under the current directory (no 1Panel custom mounts).
+# Pulls the published DeepSeek Harness image (GHCR) by default. To build
+# locally instead, uncomment the `build:` block below and set the image
+# back to a local tag (e.g. deepseek-harness:local).
 #
 # Usage:
 #   cp .env.example .env   # then edit HTTPS_ACCESS_HOST / DSH_AUTH_* / port
-#   docker compose up -d --build
+#   docker compose up -d   # pulls the image (add --build to build locally)
 #
 # Data directories are created relative to this file:
 #   ./data/dsh      - dsh home / profile state
@@ -14,10 +15,12 @@
 
 services:
   deepseek-harness:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: deepseek-harness:local
+    image: ghcr.io/wu-hins/deepseek-harness-docker:latest
+    # Uncomment to build from source instead of pulling:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    # image: deepseek-harness:local
     container_name: ${CONTAINER_NAME:-deepseek-harness}
     restart: unless-stopped
     environment:

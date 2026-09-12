@@ -12,7 +12,10 @@
 ```bash
 cp .env.example .env
 # 编辑 .env：HTTPS_ACCESS_HOST、DSH_AUTH_USERNAME、DSH_AUTH_PASSWORD
-docker compose up -d --build
+# 拉取最新发布镜像（默认）：
+docker compose up -d
+# 或者改为从源码构建：
+# docker compose up -d --build
 ```
 
 然后在浏览器打开 `https://<HTTPS_ACCESS_HOST>:<HTTPS_PORT>`，接受自签名证书
@@ -83,6 +86,10 @@ Caddy 的 BASIC 认证前置层（`auth_disabled`）。
 ---
 
 ## 本地构建（单平台）
+
+> `docker-compose.yml` 默认拉取发布的 GHCR 镜像。如需从源码构建，可参考这里的
+> 命令（构建后把 compose 指向本地镜像，见 `docker-compose.yml` 中的 `build:` 块）
+> 或手动运行容器。
 
 ```bash
 # 最新发布的 dsh 版本（默认）
